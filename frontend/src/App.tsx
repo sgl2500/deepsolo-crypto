@@ -11,10 +11,12 @@ import {
   ScreenerRow,
   TimeframeSummary,
   createIndicator,
+  deleteIndicator,
   fetchIndicatorValuePreview,
   fetchIndicators,
   fetchSummary,
   queryScreener,
+  updateIndicator,
 } from "./api";
 
 const navItems = ["选币查询", "指标生产", "指标仓库", "数据源管理", "运行日志"];
@@ -23,6 +25,7 @@ const timeframeLabels: Record<string, string> = {
   "5m": "5分钟",
   "15m": "15分钟",
   "1H": "1小时",
+  "1D": "日线",
 };
 
 const metadataOperatorOptions = [
@@ -39,6 +42,7 @@ type MetadataConditionDraft = {
   indicatorId: string;
   timeMode: string;
   timeOffset: string;
+  timePoint: string;
   operator: string;
   value: string;
   truncateMode: string;
@@ -133,21 +137,24 @@ export default function App() {
         align: "center",
         render: (value: string) => <span className="pro-symbol-cell">{value}</span>,
       },
-      ...valueConditions.map((condition) => ({
-        title: (
-          <TableColumnHead
-            title={condition.indicator.name_zh}
-            subtitle={conditionTimeSubtitle(condition, date, dates)}
-            sortable
-          />
-        ),
-        key: valueConditionKey(condition, date, dates),
-        width: 240,
-        align: "center" as const,
-        render: (_: unknown, row: ScreenerTableRow) => (
-          <FilterValueCell row={row} condition={condition} />
-        ),
-      })),
+      ...valueConditions.map((condition) => {
+        const columnValueKey = valueConditionKey(condition, date, dates);
+        return {
+          title: (
+            <TableColumnHead
+              title={condition.indicator.name_zh}
+              subtitle={conditionTimeSubtitle(condition, date, dates)}
+              sortable
+            />
+          ),
+          key: columnValueKey,
+          width: 240,
+          align: "center" as const,
+          render: (_: unknown, row: ScreenerTableRow) => (
+            <FilterValueCell row={row} condition={condition} valueKey={columnValueKey} />
+          ),
+        };
+      }),
     ],
     [date, dates, valueConditions],
   );
@@ -232,6 +239,8 @@ export default function App() {
       <main className="workspace">
         {activePage === "指标仓库" ? (
           <IndicatorWarehousePage summary={summary} />
+        ) : activePage === "指标生产" ? (
+          <IndicatorProductionPage summary={summary} />
         ) : (
           <>
             <section className="screener-terminal focused-screener">
@@ -438,8 +447,16 @@ function CompactConditionChip({
   );
 }
 
-function FilterValueCell({ row, condition }: { row: ScreenerRow; condition: MetadataCondition }) {
-  const rawValue = row.metadata_values?.[condition.indicator.id] ?? "";
+function FilterValueCell({
+  row,
+  condition,
+  valueKey,
+}: {
+  row: ScreenerRow;
+  condition: MetadataCondition;
+  valueKey: string;
+}) {
+  const rawValue = row.metadata_values?.[valueKey] ?? row.metadata_values?.[condition.indicator.id] ?? "";
   return (
     <div className="filter-value-cell single-value">
       <span>
@@ -506,7 +523,12 @@ function MetadataConditionModal({
   const currentOperatorOptions = selectedIndicator?.data_type === "number"
     ? metadataOperatorOptions.filter((item) => item.value !== "contains")
     : metadataOperatorOptions.filter((item) => ["eq", "ne", "contains"].includes(item.value));
-  const canAdd = Boolean(selectedIndicator && draft.value.trim());
+  const timePointError = selectedIndicator
+    ? metadataTimePointError(selectedIndicator.storage_period, draft.timePoint)
+    : "";
+  const timeStepSeconds = selectedIndicator ? metadataTimeStepSeconds(selectedIndicator.storage_period) : 60;
+  const timeDisabled = selectedIndicator ? !metadataPeriodAllowsTime(selectedIndicator.storage_period) : true;
+  const canAdd = Boolean(selectedIndicator && draft.value.trim() && !timePointError);
 
   function selectIndicator(item: Indicator) {
     const nextOptions = item.data_type === "number"
@@ -516,6 +538,7 @@ function MetadataConditionModal({
       ...current,
       indicatorId: item.id,
       operator: nextOptions.some((option) => option.value === current.operator) ? current.operator : nextOptions[0].value,
+      timePoint: normalizeDraftTimePointForPeriod(item.storage_period, current.timePoint),
     }));
     setMetadataSearch("");
     setSelectOpen(false);
@@ -534,9 +557,15 @@ function MetadataConditionModal({
       setError("请填写筛选条件的目标值。");
       return;
     }
+    const currentTimePointError = metadataTimePointError(selectedIndicator.storage_period, draft.timePoint);
+    if (currentTimePointError) {
+      setError(currentTimePointError);
+      return;
+    }
     onApply({
       ...draft,
       value: draft.value.trim(),
+      timePoint: normalizeDraftTimePointForPeriod(selectedIndicator.storage_period, draft.timePoint),
       id: initialCondition?.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       indicator: selectedIndicator,
     });
@@ -618,7 +647,7 @@ function MetadataConditionModal({
           {selectedIndicator && (
             <>
               <div className="condition-form-row">
-                <label>选择时间</label>
+                <label>选择交易日</label>
                 <select value={draft.timeMode} onChange={(event) => setDraft({ ...draft, timeMode: event.target.value })}>
                   <option value="previous_trading_day">前N个交易日</option>
                   <option value="current_trading_day">当前交易日</option>
@@ -638,6 +667,25 @@ function MetadataConditionModal({
                   />
                   <span>时间范围</span>
                 </label>
+              </div>
+
+              <div className="condition-form-row">
+                <label>K线时刻</label>
+                <input
+                  type="time"
+                  step={timeStepSeconds}
+                  value={timeDisabled ? "" : draft.timePoint}
+                  disabled={timeDisabled}
+                  onChange={(event) => setDraft({ ...draft, timePoint: event.target.value })}
+                />
+                <span className={timePointError ? "condition-time-hint invalid" : "condition-time-hint"}>
+                  {timePointError || metadataTimePointHint(selectedIndicator.storage_period, draft.timePoint)}
+                </span>
+                {!timeDisabled && draft.timePoint && (
+                  <button className="condition-mini-button" onClick={() => setDraft({ ...draft, timePoint: "" })}>
+                    清空
+                  </button>
+                )}
               </div>
 
               <div className="condition-form-row">
@@ -675,12 +723,10 @@ function MetadataConditionModal({
 
         <div className="condition-modal-foot">
           <div>
-            {selectedIndicator ? (
+            {selectedIndicator && (
               <span>
                 当前选择：{selectedIndicator.name_zh} · {timeframeLabels[selectedIndicator.storage_period] ?? selectedIndicator.storage_period}
               </span>
-            ) : (
-              <span>元数据来自指标仓库，已加载全部周期；可搜索中文名、英文名或 ID。</span>
             )}
             {error && <strong>{error}</strong>}
           </div>
@@ -690,6 +736,271 @@ function MetadataConditionModal({
         </div>
       </div>
     </div>
+  );
+}
+
+function IndicatorProductionPage({ summary }: { summary: DataSummary | null }) {
+  const periods = summary?.timeframes.map((item) => item.key) ?? ["1m", "5m", "15m", "1H"];
+  const [items, setItems] = useState<Indicator[]>([]);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingTarget, setEditingTarget] = useState<Indicator | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Indicator | null>(null);
+  const [scriptPreview, setScriptPreview] = useState<Indicator | null>(null);
+  const [aiTarget, setAiTarget] = useState<Indicator | null>(null);
+  const [form, setForm] = useState(() => defaultScriptIndicatorForm(periods[0] ?? "1m"));
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void loadScriptIndicators();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function loadScriptIndicators() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchIndicators({ sourceType: "script" });
+      setItems(data.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "脚本指标加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreateModal() {
+    setEditingTarget(null);
+    setForm(defaultScriptIndicatorForm(periods[0] ?? "1m"));
+    setModalOpen(true);
+  }
+
+  function openEditModal(item: Indicator) {
+    setEditingTarget(item);
+    setForm(scriptIndicatorFormFromItem(item));
+    setModalOpen(true);
+  }
+
+  async function saveScriptIndicator() {
+    const name = form.nameZh.trim();
+    if (!name) {
+      setError("请输入指标中文名。");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+    try {
+      const payload = {
+        id: `script.${form.period}.${form.englishName}`,
+        name_zh: name,
+        storage_period: form.period,
+        data_type: "number",
+        unit: "",
+        source_type: "script",
+        description: "脚本生产指标，等待配置脚本、运行和部署。",
+      } as const;
+      if (editingTarget) {
+        await updateIndicator(editingTarget.id, payload);
+      } else {
+        await createIndicator(payload);
+      }
+      setEditingTarget(null);
+      setModalOpen(false);
+      await loadScriptIndicators();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : editingTarget ? "脚本指标更新失败" : "脚本指标保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteScriptIndicator() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await deleteIndicator(deleteTarget.id);
+      setScriptPreview((current) => (current?.id === deleteTarget.id ? null : current));
+      setAiTarget((current) => (current?.id === deleteTarget.id ? null : current));
+      setDeleteTarget(null);
+      await loadScriptIndicators();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "脚本指标删除失败");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <section className="indicator-production-page">
+      <div className="production-head">
+        <div>
+          <h1>指标生产</h1>
+          <p>用 shell 脚本生产公式指标；先创建指标卡片，再配置运行、部署和历史回补。</p>
+        </div>
+        <button className="primary-action" onClick={openCreateModal}>新增指标</button>
+      </div>
+
+      {error && <div className="inline-error production-error">{error}</div>}
+
+      {loading ? (
+        <EmptyState title="正在加载脚本指标" text="读取指标仓库里的 script 类型指标。" />
+      ) : items.length === 0 ? (
+        <div className="production-empty">
+          <strong>还没有脚本指标</strong>
+          <p>点击右上角「新增指标」创建第一个脚本生产指标。</p>
+          <button className="primary-action" onClick={openCreateModal}>新增指标</button>
+        </div>
+      ) : (
+        <div className="script-indicator-grid">
+          {items.map((item) => (
+            <article className="script-indicator-card" key={item.id}>
+              <div className="script-card-top">
+                <span>脚本指标</span>
+                <b>草稿</b>
+              </div>
+              <h2>{item.name_zh}</h2>
+              <p>{item.id}</p>
+              <div className="script-card-meta">
+                <span>{timeframeLabels[item.storage_period] ?? item.storage_period}</span>
+                <span>{typeLabel(item.data_type)}</span>
+                <span>{item.unit || "无单位"}</span>
+              </div>
+              <div className="script-card-actions">
+                <button onClick={() => setScriptPreview(item)}>查看脚本</button>
+                <button className="ai-help-button" onClick={() => setAiTarget(item)}>AI助力</button>
+                <button onClick={() => openEditModal(item)}>编辑</button>
+                <button className="danger-action" onClick={() => setDeleteTarget(item)}>删除</button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {modalOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => {
+          setEditingTarget(null);
+          setModalOpen(false);
+        }}>
+          <div className="script-create-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <span className="eyebrow">{editingTarget ? "编辑脚本指标" : "新增脚本指标"}</span>
+                <h2>{editingTarget ? "修改指标卡片" : "创建指标卡片"}</h2>
+              </div>
+              <button className="close-button" onClick={() => {
+                setEditingTarget(null);
+                setModalOpen(false);
+              }}>×</button>
+            </div>
+            <div className="script-create-body">
+              <label>
+                指标中文名
+                <input
+                  value={form.nameZh}
+                  placeholder="例如：大阳线放量强度"
+                  onChange={(event) => {
+                    const nameZh = event.target.value;
+                    setForm({ ...form, nameZh, englishName: autoScriptEnglishName(nameZh) });
+                  }}
+                />
+              </label>
+              <label>
+                指标英文名
+                <input value={form.englishName} disabled />
+              </label>
+              <label>
+                指标周期
+                <select value={form.period} onChange={(event) => setForm({ ...form, period: event.target.value })}>
+                  {periods.map((period) => (
+                    <option value={period} key={period}>{timeframeLabels[period] ?? period}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="script-id-preview">
+                指标 ID：<strong>script.{form.period}.{form.englishName}</strong>
+              </div>
+              {editingTarget && (
+                <p className="script-edit-note">
+                  修改中文名或周期后，系统会同步更新指标仓库里的脚本指标 ID。
+                </p>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button className="secondary-action" onClick={() => {
+                setEditingTarget(null);
+                setModalOpen(false);
+              }}>取消</button>
+              <button className="primary-action" disabled={saving || !form.nameZh.trim()} onClick={() => void saveScriptIndicator()}>
+                {saving ? "保存中..." : editingTarget ? "保存修改" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setDeleteTarget(null)}>
+          <div className="script-delete-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <span className="eyebrow danger">删除脚本指标</span>
+                <h2>{deleteTarget.name_zh}</h2>
+              </div>
+              <button className="close-button" onClick={() => setDeleteTarget(null)}>×</button>
+            </div>
+            <p>
+              删除后会从指标仓库移除这个 script 类型指标。后续如果已经绑定脚本文件或产出数据，也会以这个指标 ID 为关联入口，请确认不再需要。
+            </p>
+            <div className="modal-actions">
+              <button className="secondary-action" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button className="danger-confirm" disabled={deleting} onClick={() => void deleteScriptIndicator()}>
+                {deleting ? "删除中..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {scriptPreview && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setScriptPreview(null)}>
+          <div className="script-preview-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <span className="eyebrow">查看脚本</span>
+                <h2>{scriptPreview.name_zh}</h2>
+              </div>
+              <button className="close-button" onClick={() => setScriptPreview(null)}>×</button>
+            </div>
+            <pre>{scriptTemplate(scriptPreview)}</pre>
+          </div>
+        </div>
+      )}
+
+      {aiTarget && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTarget(null)}>
+          <div className="script-preview-modal ai-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <span className="eyebrow">AI助力</span>
+                <h2>{aiTarget.name_zh}</h2>
+              </div>
+              <button className="close-button" onClick={() => setAiTarget(null)}>×</button>
+            </div>
+            <p className="ai-help-copy">
+              下一步这里会根据指标名称、输入周期和目标输出，帮你生成 shell 脚本骨架、Python 计算逻辑和回补命令。
+            </p>
+            <textarea
+              readOnly
+              value={`请帮我为指标「${aiTarget.name_zh}」生成一个 ${aiTarget.storage_period} 周期的指标生产脚本，输出 inst_id,ts,value。`}
+            />
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1133,11 +1444,69 @@ function defaultIndicatorForm(period: string) {
   };
 }
 
+function defaultScriptIndicatorForm(period: string) {
+  return {
+    nameZh: "",
+    englishName: "script_indicator",
+    period,
+  };
+}
+
+function scriptIndicatorFormFromItem(item: Indicator) {
+  return {
+    nameZh: item.name_zh,
+    englishName: scriptEnglishNameFromId(item) || autoScriptEnglishName(item.name_zh),
+    period: item.storage_period,
+  };
+}
+
+function scriptEnglishNameFromId(item: Indicator) {
+  const prefix = `script.${item.storage_period}.`;
+  if (item.id.startsWith(prefix)) return item.id.slice(prefix.length);
+  const parts = item.id.split(".");
+  return parts.at(-1) ?? "";
+}
+
+function autoScriptEnglishName(nameZh: string) {
+  const ascii = nameZh
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (ascii) return ascii.slice(0, 48);
+  const fallback = stableNumericId(nameZh || `${Date.now()}`).slice(0, 8);
+  return `indicator_${fallback}`;
+}
+
+function scriptTemplate(item: Indicator) {
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    `# 指标：${item.name_zh}`,
+    `# ID：${item.id}`,
+    `# 周期：${item.storage_period}`,
+    "#",
+    "# 平台后续会以环境变量方式传入：",
+    "# RUN_DATE=2026-05-20",
+    `# TIMEFRAME=${item.storage_period}`,
+    "# DATA_ROOT=/path/to/normalized_gzip",
+    "# OUTPUT_ROOT=/path/to/.runtime/script_indicators",
+    "#",
+    "# 输出格式必须是：",
+    "# inst_id,ts,value",
+    "",
+    `echo "TODO: calculate ${item.id} for $RUN_DATE"`,
+    "",
+  ].join("\n");
+}
+
 function defaultMetadataConditionDraft(): MetadataConditionDraft {
   return {
     indicatorId: "",
     timeMode: "previous_trading_day",
     timeOffset: "1",
+    timePoint: "",
     operator: "gt",
     value: "",
     truncateMode: "none",
@@ -1153,6 +1522,7 @@ function draftFromCondition(condition: MetadataCondition): MetadataConditionDraf
     indicatorId: condition.indicator.id,
     timeMode: condition.timeMode,
     timeOffset: condition.timeOffset,
+    timePoint: normalizeDraftTimePointForPeriod(condition.indicator.storage_period, condition.timePoint || ""),
     operator: condition.operator,
     value: condition.value,
     truncateMode: condition.truncateMode,
@@ -1170,6 +1540,7 @@ function toMetadataFilterPayload(condition: MetadataCondition): ScreenerMetadata
     value: condition.value,
     time_mode: condition.timeMode,
     time_offset: condition.timeOffset,
+    time_point: condition.timePoint || "",
     truncate_mode: condition.truncateMode,
     truncate_count: condition.truncateCount,
     external_relation: condition.externalRelation,
@@ -1190,9 +1561,10 @@ function metadataConditionText(condition: MetadataCondition) {
     : condition.timeMode === "current_trading_day"
       ? "当前交易日"
       : "最新可用时间";
+  const pointText = conditionTimePointText(condition);
   const unit = condition.indicator.unit ? ` ${condition.indicator.unit}` : "";
   const exclude = condition.exclude ? "排除：" : "";
-  return `${exclude}${timeText} ${operator} ${condition.value}${unit}`;
+  return `${exclude}${timeText}${pointText} ${operator} ${condition.value}${unit}`;
 }
 
 function metadataOperatorLabel(value: string) {
@@ -1218,7 +1590,11 @@ function valueConditionKey(
   date: string,
   dates: Array<{ date: string; file_count: number }>,
 ) {
-  return `${condition.indicator.id}::${conditionTargetDate(condition, date, dates)}`;
+  return metadataValueKey(
+    condition.indicator.id,
+    conditionTargetDate(condition, date, dates),
+    condition.timePoint,
+  );
 }
 
 function conditionTimeSubtitle(
@@ -1229,12 +1605,91 @@ function conditionTimeSubtitle(
   if (condition.timeMode === "previous_trading_day") {
     const targetDate = conditionTargetDate(condition, date, dates);
     const suffix = targetDate ? ` ${formatDateBadge(targetDate)}` : "";
-    return `前${condition.timeOffset || "N"}个交易日${suffix}`;
+    return `前${condition.timeOffset || "N"}个交易日${suffix}${conditionTimePointSuffix(condition)}`;
   }
   if (condition.timeMode === "current_trading_day") {
-    return formatDateBadge(date) || "当前交易日";
+    return `${formatDateBadge(date) || "当前交易日"}${conditionTimePointSuffix(condition)}`;
   }
-  return "最新可用时间";
+  return `最新可用时间${conditionTimePointSuffix(condition)}`;
+}
+
+function conditionTimePointSuffix(condition: MetadataCondition) {
+  return conditionTimePointText(condition);
+}
+
+function conditionTimePointText(condition: MetadataCondition) {
+  if (!metadataPeriodAllowsTime(condition.indicator.storage_period)) return "";
+  return condition.timePoint ? ` ${condition.timePoint}` : " 最新K线";
+}
+
+function metadataValueKey(indicatorId: string, targetDate: string, timePoint: string | undefined) {
+  return `${indicatorId}::${targetDate}::${normalizeConditionTimePoint(timePoint) || "latest"}`;
+}
+
+function normalizeConditionTimePoint(value: string | undefined) {
+  return (value || "").trim();
+}
+
+function normalizeDraftTimePointForPeriod(period: string, value: string | undefined) {
+  const normalized = normalizeConditionTimePoint(value);
+  if (!normalized) return "";
+  return metadataTimePointError(period, normalized) ? "" : normalized;
+}
+
+function metadataPeriodAllowsTime(period: string) {
+  return metadataPeriodStepMinutes(period) !== null;
+}
+
+function metadataTimeStepSeconds(period: string) {
+  return (metadataPeriodStepMinutes(period) ?? 1) * 60;
+}
+
+function metadataTimePointHint(period: string, timePoint: string | undefined) {
+  const label = timeframeLabels[period] ?? period;
+  const step = metadataPeriodStepMinutes(period);
+  if (step === null) return `${label}只按交易日取值，不填写分钟时间`;
+  const rule = metadataTimePointRuleText(period);
+  if (timePoint) return `取 ${timePoint} 这根 ${label} K线；${rule}`;
+  return `不填则取该日期最新一根${label}K线；${rule}`;
+}
+
+function metadataTimePointRuleText(period: string) {
+  const step = metadataPeriodStepMinutes(period);
+  if (step === null) return "只需要选择交易日";
+  if (step === 1) return "可精确到任意分钟";
+  if (step === 60) return "只能选择整点时间";
+  return `只能选择 ${step} 分钟整数倍时间`;
+}
+
+function metadataTimePointError(period: string, value: string | undefined) {
+  const normalized = normalizeConditionTimePoint(value);
+  if (!normalized) return "";
+
+  const label = timeframeLabels[period] ?? period;
+  const step = metadataPeriodStepMinutes(period);
+  if (step === null) return `${label}只能选择交易日，不能填写分钟时间`;
+
+  const match = normalized.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return "K线时刻格式应为 HH:mm";
+  const hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  const second = match[3] ? Number.parseInt(match[3], 10) : 0;
+  if (hour > 23 || minute > 59 || second > 59) return "K线时刻超出有效范围";
+  if (second !== 0) return "K线时刻只能精确到分钟";
+  const totalMinutes = hour * 60 + minute;
+  if (totalMinutes % step !== 0) return `${label}${metadataTimePointRuleText(period)}`;
+  return "";
+}
+
+function metadataPeriodStepMinutes(period: string) {
+  const normalized = period.trim().toLowerCase();
+  const match = normalized.match(/^(\d+)(m|h|d)$/);
+  if (!match) return 1;
+  const count = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(count) || count <= 0) return 1;
+  if (match[2] === "m") return count;
+  if (match[2] === "h") return count * 60;
+  return null;
 }
 
 function conditionTargetDate(
@@ -1334,7 +1789,7 @@ function TypeBadge({ value }: { value: Indicator["data_type"] }) {
 }
 
 function SourceBadge({ value }: { value: Indicator["source_type"] }) {
-  const label = value === "raw" ? "原始字段" : value === "computed" ? "计算指标" : "手动";
+  const label = value === "raw" ? "原始字段" : value === "computed" ? "计算指标" : value === "script" ? "脚本指标" : "手动";
   return <span className={`source-badge ${value}`}>{label}</span>;
 }
 

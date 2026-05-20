@@ -51,6 +51,7 @@ export type ScreenerMetadataFilterPayload = {
   value: string;
   time_mode?: string;
   time_offset?: string;
+  time_point?: string;
   truncate_mode?: string;
   truncate_count?: string;
   external_relation?: boolean;
@@ -64,7 +65,7 @@ export type Indicator = {
   storage_period: string;
   data_type: "number" | "string" | "datetime" | "boolean";
   unit: string;
-  source_type: "raw" | "manual" | "computed";
+  source_type: "raw" | "manual" | "computed" | "script";
   raw_field?: string;
   description: string;
   created_at: number;
@@ -149,11 +150,15 @@ export async function fetchIndicatorValuePreview(params: {
 
 export async function fetchIndicators(params: {
   storagePeriod?: string;
+  sourceType?: Indicator["source_type"];
   query?: string;
 } = {}): Promise<IndicatorCatalogResponse> {
   const search = new URLSearchParams();
   if (params.storagePeriod && params.storagePeriod !== "all") {
     search.set("storage_period", params.storagePeriod);
+  }
+  if (params.sourceType) {
+    search.set("source_type", params.sourceType);
   }
   if (params.query) {
     search.set("query", params.query);
@@ -167,6 +172,20 @@ export async function createIndicator(payload: IndicatorCreatePayload): Promise<
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+}
+
+export async function updateIndicator(indicatorId: string, payload: IndicatorCreatePayload): Promise<Indicator> {
+  return request(`/api/indicators/catalog/${encodeURIComponent(indicatorId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteIndicator(indicatorId: string): Promise<{ deleted: string }> {
+  return request(`/api/indicators/catalog/${encodeURIComponent(indicatorId)}`, {
+    method: "DELETE",
   });
 }
 

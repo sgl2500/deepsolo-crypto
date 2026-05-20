@@ -106,6 +106,27 @@ def create_indicator(payload: IndicatorCreate) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.put("/api/indicators/catalog/{indicator_id:path}")
+def update_indicator(indicator_id: str, payload: IndicatorCreate) -> dict:
+    try:
+        return indicator_repository.update(indicator_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/indicators/catalog/{indicator_id:path}")
+def delete_indicator(indicator_id: str) -> dict:
+    try:
+        deleted = indicator_repository.delete(indicator_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"deleted": deleted["id"]}
+
+
 @app.post("/api/indicators/catalog/reset-seed")
 def reset_indicator_seed() -> dict:
     items = indicator_repository.reset_seed()

@@ -14,7 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 STORE_PATH = ROOT_DIR / ".runtime" / "indicator_repository.json"
 
 DataType = Literal["number", "string", "datetime", "boolean"]
-SourceType = Literal["raw", "manual", "computed"]
+SourceType = Literal["raw", "manual", "computed", "script"]
 
 
 class IndicatorCreate(BaseModel):
@@ -143,6 +143,8 @@ class IndicatorRepository:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.store_path.exists():
             self._write(self._seed_indicators())
+        else:
+            self._ensure_seed_indicators()
 
     def list(
         self,
@@ -188,6 +190,50 @@ class IndicatorRepository:
         self._write(items)
         return item
 
+    def update(self, indicator_id: str, payload: IndicatorCreate) -> dict[str, Any]:
+        items = self._read()
+        index = next((idx for idx, item in enumerate(items) if item["id"] == indicator_id), None)
+        if index is None:
+            raise KeyError(f"指标不存在：{indicator_id}")
+
+        current = items[index]
+        if current["source_type"] == "raw":
+            raise ValueError("内置原始字段不能编辑")
+        if payload.source_type != current["source_type"]:
+            raise ValueError("不能修改指标来源类型")
+        if payload.id != indicator_id and any(
+            item["id"] == payload.id for idx, item in enumerate(items) if idx != index
+        ):
+            raise ValueError(f"指标 id 已存在：{payload.id}")
+
+        now = int(time.time() * 1000)
+        item = {
+            "id": payload.id,
+            "name_zh": payload.name_zh,
+            "storage_period": payload.storage_period,
+            "data_type": payload.data_type,
+            "unit": payload.unit,
+            "source_type": payload.source_type,
+            "description": payload.description,
+            "created_at": current.get("created_at", now),
+            "updated_at": now,
+        }
+        items[index] = item
+        self._write(items)
+        return item
+
+    def delete(self, indicator_id: str) -> dict[str, Any]:
+        items = self._read()
+        index = next((idx for idx, item in enumerate(items) if item["id"] == indicator_id), None)
+        if index is None:
+            raise KeyError(f"指标不存在：{indicator_id}")
+        if items[index]["source_type"] == "raw":
+            raise ValueError("内置原始字段不能删除")
+
+        deleted = items.pop(index)
+        self._write(items)
+        return deleted
+
     def get(self, indicator_id: str) -> dict[str, Any] | None:
         for item in self._read():
             if item["id"] == indicator_id:
@@ -215,6 +261,13 @@ class IndicatorRepository:
         items = self._seed_indicators()
         self._write(items)
         return items
+
+    def _ensure_seed_indicators(self) -> None:
+        items = self._read()
+        existing_ids = {item.get("id") for item in items}
+        missing = [item for item in self._seed_indicators() if item["id"] not in existing_ids]
+        if missing:
+            self._write([*items, *missing])
 
     def _seed_indicators(self) -> list[dict[str, Any]]:
         now = int(time.time() * 1000)

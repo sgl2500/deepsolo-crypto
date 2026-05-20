@@ -18,5 +18,5 @@ TIMEFRAMES = {
     "5m": "candles_5m",
     "15m": "candles_15m",
     "1H": "candles_1H",
+    "1D": "candles_1D",
 }
-

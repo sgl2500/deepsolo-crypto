@@ -309,12 +309,15 @@ def _match_metadata_filters(
             if source_path is None:
                 all_passed = False
                 continue
-            source_row = _latest_raw_row(source_path, as_of_ts)
+            condition_as_of_ts = _condition_as_of_ts(condition, target_date, indicator_period, as_of_ts)
+            source_row = _latest_raw_row(source_path, condition_as_of_ts)
             if source_row is None:
                 all_passed = False
                 continue
 
         raw_value = source_row.get(raw_field, "")
+        value_key = _metadata_value_key(indicator_id, target_date, str(condition.get("time_point") or ""))
+        values[value_key] = raw_value
         values[indicator_id] = raw_value
         operator = str(condition.get("operator") or "gt")
         expected = str(condition.get("value") or "")
@@ -381,6 +384,60 @@ def _condition_target_date(condition: dict[str, Any], period: str, selected_date
         target_index = insert_at - offset
     target_index = max(0, min(target_index, len(dates) - 1))
     return dates[target_index]
+
+
+def _condition_as_of_ts(
+    condition: dict[str, Any],
+    target_date: str,
+    indicator_period: str,
+    fallback_as_of_ts: int | None,
+) -> int | None:
+    time_point = str(condition.get("time_point") or "").strip()
+    if time_point:
+        return _parse_time_point(target_date, time_point, indicator_period)
+    return fallback_as_of_ts
+
+
+def _parse_time_point(date: str, time_point: str, indicator_period: str) -> int:
+    step = _period_step_minutes(indicator_period)
+    normalized = time_point.strip()
+    if not normalized:
+        raise ValueError("筛选条件的 K线时刻不能为空")
+    if step is None:
+        raise ValueError(f"{indicator_period} 周期只能指定交易日，不能指定 K线时刻")
+    if len(normalized) == 5:
+        normalized = f"{normalized}:00"
+    dt = datetime.fromisoformat(f"{date}T{normalized}")
+    dt = dt.replace(tzinfo=ZoneInfo(APP_TIMEZONE))
+    if dt.second != 0:
+        raise ValueError("筛选条件的 K线时刻只能精确到分钟")
+    total_minutes = dt.hour * 60 + dt.minute
+    if total_minutes % step != 0:
+        raise ValueError(f"{indicator_period} 周期的 K线时刻必须是 {step} 分钟整数倍")
+    return int(dt.timestamp() * 1000)
+
+
+def _metadata_value_key(indicator_id: str, target_date: str, time_point: str) -> str:
+    normalized_time = time_point.strip() or "latest"
+    return f"{indicator_id}::{target_date}::{normalized_time}"
+
+
+def _period_step_minutes(period: str) -> int | None:
+    normalized = period.strip().lower()
+    unit = normalized[-1:] if normalized else ""
+    try:
+        count = int(normalized[:-1])
+    except ValueError:
+        return 1
+    if count <= 0:
+        return 1
+    if unit == "m":
+        return count
+    if unit == "h":
+        return count * 60
+    if unit == "d":
+        return None
+    return 1
 
 
 def _available_dates(period: str) -> list[str]:
