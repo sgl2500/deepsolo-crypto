@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .data_quality_service import data_quality_service
 from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
 from .indicator_repository import IndicatorCreate, indicator_repository
@@ -95,6 +96,37 @@ def active_contracts(
 ) -> dict:
     try:
         return data_source_service.active_contracts(timeframe, date, query, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/data-quality/summary")
+def data_quality_summary(timeframe: str = "1m", force: bool = False) -> dict:
+    try:
+        return data_quality_service.summary(timeframe=timeframe, force=force)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/data-quality/dates")
+def data_quality_dates(
+    timeframe: str = "1m",
+    limit: int = Query(default=90, ge=1, le=365),
+    force: bool = False,
+) -> dict:
+    try:
+        return data_quality_service.date_report(timeframe=timeframe, limit=limit, force=force)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/data-quality/contracts/{inst_id}")
+def data_quality_contract(
+    inst_id: str,
+    gap_limit: int = Query(default=30, ge=1, le=100),
+) -> dict:
+    try:
+        return data_quality_service.contract_report(inst_id=inst_id, gap_limit=gap_limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -362,5 +394,7 @@ def screener_query(
             metadata_filters=parsed_metadata_filters,
             limit=limit,
         )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

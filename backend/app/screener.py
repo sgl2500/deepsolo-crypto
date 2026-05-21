@@ -442,6 +442,9 @@ def _metadata_script_values(filters: list[dict[str, Any]]) -> dict[tuple[str, st
             input_timeframe=str(indicator.get("storage_period") or "1m"),
             limit=1000,
         )
+        if result.get("timed_out"):
+            detail = result.get("stderr") or "脚本指标运行超时"
+            raise TimeoutError(f"{indicator.get('name_zh') or indicator_id}：{detail}")
         if not result.get("success"):
             detail = result.get("stderr") or "脚本执行失败，无法参与组合查询"
             raise ValueError(f"{indicator.get('name_zh') or indicator_id}：{detail}")

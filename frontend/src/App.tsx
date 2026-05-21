@@ -7,6 +7,9 @@ import {
   ContractKlineResponse,
   ContractKlineRow,
   ContractUpdateStatus,
+  DataQualityContractReport,
+  DataQualityDateReport,
+  DataQualitySummary,
   DataSummary,
   Indicator,
   IndicatorCatalogResponse,
@@ -25,6 +28,9 @@ import {
   fetchActiveContracts,
   fetchContractKlineWindow,
   fetchContractUpdateStatus,
+  fetchDataQualityContract,
+  fetchDataQualityDates,
+  fetchDataQualitySummary,
   fetchIndicatorValuePreview,
   fetchIndicators,
   fetchScreenerFavorites,
@@ -120,6 +126,7 @@ export default function App() {
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const timeStripRef = useRef<HTMLDivElement | null>(null);
+  const queryRunRef = useRef(0);
 
   useEffect(() => {
     void loadSummary();
@@ -140,6 +147,8 @@ export default function App() {
     if (date && metadataConditions.length > 0) {
       void runQuery();
     } else {
+      queryRunRef.current += 1;
+      setQuerying(false);
       setResult(null);
     }
   }, [date, timeframe, metadataConditions, sortBy, asOfTime]);
@@ -147,6 +156,7 @@ export default function App() {
   const tfSummary = currentTimeframe(summary, timeframe);
   const dates = useMemo(() => tfSummary?.dates.slice().reverse() ?? [], [tfSummary]);
   const rows = result?.rows ?? [];
+  const queryTimedOut = isTimeoutMessage(error);
   const valueConditions = useMemo(
     () => uniqueValueConditions(metadataConditions, date, dates),
     [metadataConditions, date, dates],
@@ -353,11 +363,16 @@ export default function App() {
   async function runQuery() {
     if (!date) return;
     if (metadataConditions.length === 0) {
+      queryRunRef.current += 1;
+      setQuerying(false);
       setResult(null);
       return;
     }
+    const runId = queryRunRef.current + 1;
+    queryRunRef.current = runId;
     setQuerying(true);
     setError(null);
+    setResult(null);
     try {
       const data = await queryScreener({
         timeframe,
@@ -369,11 +384,15 @@ export default function App() {
         sortBy,
         metadataFilters: metadataConditions.map(toMetadataFilterPayload),
       });
+      if (runId !== queryRunRef.current) return;
       setResult(data);
     } catch (err) {
+      if (runId !== queryRunRef.current) return;
       setError(err instanceof Error ? err.message : "选币查询失败");
     } finally {
-      setQuerying(false);
+      if (runId === queryRunRef.current) {
+        setQuerying(false);
+      }
     }
   }
 
@@ -480,8 +499,9 @@ export default function App() {
 
               <div className="terminal-query-row focused-date-row" ref={timeStripRef}>
                 <div className="selected-total">
-                  <span>选出</span>
-                  <strong>{result?.matched_count ?? 0}</strong>
+                  <span>{querying ? "查询中" : "选出"}</span>
+                  <strong>{querying ? "..." : result?.matched_count ?? 0}</strong>
+                  {!querying && result && <em>{result.duration_ms}ms</em>}
                 </div>
                 <div className="date-switcher compact-date-switcher">
                   <button disabled={!previousDate} onClick={() => previousDate && setDate(previousDate.date)}>‹</button>
@@ -508,14 +528,16 @@ export default function App() {
               <section className="terminal-table-panel focused-table-panel">
                 {loading ? (
                   <EmptyState title="正在扫描数据源" text="读取本地 normalized_gzip 分区和合约覆盖。" />
+                ) : querying ? (
+                  <EmptyState title="正在查询选币结果" text="正在运行组合条件和脚本指标；成功返回后显示命中数量，接口或脚本超时会显示明确错误。" />
                 ) : error ? (
-                  <EmptyState title="发生错误" text={error} />
+                  <EmptyState title={queryTimedOut ? "接口请求超时" : "查询失败"} text={error} />
                 ) : metadataConditions.length === 0 ? (
                   <EmptyState title="等待筛选条件" text="点击上方「+筛选条件」选择元数据；未设置条件时不会默认展示全部合约。" />
                 ) : result === null ? (
                   <EmptyState title="等待查询结果" text="条件添加后会自动查询，也可以点击右上角页面刷新。" />
                 ) : rows.length === 0 ? (
-                  <EmptyState title="暂无命中合约" text="当前日期下没有合约满足组合筛选条件。" />
+                  <EmptyState title="暂无命中合约" text={`选币接口已正常返回，${date || "当前日期"} 没有合约满足组合筛选条件；本次耗时 ${result.duration_ms}ms。`} />
                 ) : (
                   <ConfigProvider
                     theme={{
@@ -1290,6 +1312,15 @@ function ContractListPage({
   const [query, setQuery] = useState("");
   const [data, setData] = useState<ContractListResponse | null>(null);
   const [updateStatus, setUpdateStatus] = useState<ContractUpdateStatus | null>(null);
+  const [qualitySummary, setQualitySummary] = useState<DataQualitySummary | null>(null);
+  const [qualityDates, setQualityDates] = useState<DataQualityDateReport | null>(null);
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const [qualityLoading, setQualityLoading] = useState(false);
+  const [qualityError, setQualityError] = useState<string | null>(null);
+  const [contractQualityTarget, setContractQualityTarget] = useState<string | null>(null);
+  const [contractQuality, setContractQuality] = useState<DataQualityContractReport | null>(null);
+  const [contractQualityLoading, setContractQualityLoading] = useState(false);
+  const [contractQualityError, setContractQualityError] = useState<string | null>(null);
   const [startingUpdate, setStartingUpdate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1312,6 +1343,11 @@ function ContractListPage({
   }, []);
 
   useEffect(() => {
+    void loadQualityOverview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storagePeriod]);
+
+  useEffect(() => {
     if (!updateStatus?.running) return;
     const timer = window.setInterval(() => {
       void loadUpdateStatus();
@@ -1328,6 +1364,7 @@ function ContractListPage({
     updateWasRunningRef.current = false;
     void onSummaryRefresh();
     void loadContracts();
+    void loadQualityOverview(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [updateStatus?.running, updateStatus?.success]);
 
@@ -1359,6 +1396,38 @@ function ContractListPage({
     }
   }
 
+  async function loadQualityOverview(force = false) {
+    setQualityLoading(true);
+    setQualityError(null);
+    try {
+      const [summaryResult, dateResult] = await Promise.all([
+        fetchDataQualitySummary({ timeframe: storagePeriod, force }),
+        fetchDataQualityDates({ timeframe: storagePeriod, limit: 90, force }),
+      ]);
+      setQualitySummary(summaryResult);
+      setQualityDates(dateResult);
+    } catch (err) {
+      setQualityError(err instanceof Error ? err.message : "数据完整性报告加载失败");
+    } finally {
+      setQualityLoading(false);
+    }
+  }
+
+  async function openContractQuality(instId: string) {
+    setContractQualityTarget(instId);
+    setContractQuality(null);
+    setContractQualityLoading(true);
+    setContractQualityError(null);
+    try {
+      const report = await fetchDataQualityContract(instId, 30);
+      setContractQuality(report);
+    } catch (err) {
+      setContractQualityError(err instanceof Error ? err.message : "单合约数据报告加载失败");
+    } finally {
+      setContractQualityLoading(false);
+    }
+  }
+
   async function startUpdateDeploy() {
     setStartingUpdate(true);
     setError(null);
@@ -1381,8 +1450,10 @@ function ContractListPage({
   const tf = currentTimeframe(summary, storagePeriod);
   const updateRunning = Boolean(updateStatus?.running);
   const updateLabel = updateStatus?.stage_label ?? "未运行";
+  const latestQualityTimeframe = qualitySummary?.timeframes.find((item) => item.timeframe === storagePeriod);
 
   return (
+    <>
     <section className="metadata-page contract-list-page">
       <div className="metadata-page-head">
         <div>
@@ -1392,6 +1463,12 @@ function ContractListPage({
           </p>
         </div>
         <div className="metadata-actions">
+          <button className="secondary-action" onClick={() => {
+            setQualityOpen(true);
+            void loadQualityOverview();
+          }}>
+            数据完整性报告
+          </button>
           <button
             className="primary-action"
             disabled={startingUpdate || updateRunning}
@@ -1421,6 +1498,11 @@ function ContractListPage({
         <div>
           <span>最新数据分区</span>
           <strong>{formatDateBadge(tf?.latest_date ?? "") || "--"}</strong>
+        </div>
+        <div className={`quality-strip-card ${qualitySummary?.status ?? ""}`}>
+          <span>数据健康</span>
+          <strong>{qualityLoading ? "检查中" : qualitySummary?.status_label ?? "--"}</strong>
+          {latestQualityTimeframe && <em>缺 {latestQualityTimeframe.missing_latest_count} / 多 {latestQualityTimeframe.extra_latest_count}</em>}
         </div>
       </div>
 
@@ -1482,18 +1564,19 @@ function ContractListPage({
                 <th>最新K线时间</th>
                 <th>周期</th>
                 <th>状态</th>
+                <th>数据报告</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <EmptyState title="正在加载合约" text="读取当前在线合约与本地K线数据。" />
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <EmptyState title="暂无合约" text="当前条件下没有找到合约，换个日期或搜索词试试。" />
                   </td>
                 </tr>
@@ -1507,6 +1590,11 @@ function ContractListPage({
                     <td>{row.latest_time ?? "--"}</td>
                     <td>{timeframeLabels[data?.timeframe ?? storagePeriod] ?? data?.timeframe ?? storagePeriod}</td>
                     <td><span className="contract-status-badge">交易中</span></td>
+                    <td>
+                      <button className="quality-report-button" onClick={() => void openContractQuality(row.inst_id)}>
+                        报告
+                      </button>
+                    </td>
                   </tr>
                 ))
               )}
@@ -1524,7 +1612,346 @@ function ContractListPage({
         </div>
       </div>
     </section>
+    {qualityOpen && (
+      <DataQualityModal
+        summary={qualitySummary}
+        dates={qualityDates}
+        timeframe={storagePeriod}
+        loading={qualityLoading}
+        error={qualityError}
+        onClose={() => setQualityOpen(false)}
+        onRefresh={() => void loadQualityOverview(true)}
+        onOpenContract={(instId) => void openContractQuality(instId)}
+      />
+    )}
+    {contractQualityTarget && (
+      <ContractQualityModal
+        instId={contractQualityTarget}
+        report={contractQuality}
+        loading={contractQualityLoading}
+        error={contractQualityError}
+        onClose={() => {
+          setContractQualityTarget(null);
+          setContractQuality(null);
+          setContractQualityError(null);
+        }}
+      />
+    )}
+    </>
   );
+}
+
+function DataQualityModal({
+  summary,
+  dates,
+  timeframe,
+  loading,
+  error,
+  onClose,
+  onRefresh,
+  onOpenContract,
+}: {
+  summary: DataQualitySummary | null;
+  dates: DataQualityDateReport | null;
+  timeframe: string;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onRefresh: () => void;
+  onOpenContract: (instId: string) => void;
+}) {
+  const abnormalDates = dates?.rows.filter((row) => row.status !== "ok") ?? [];
+  const latestDateRows = dates?.rows.slice(0, 12) ?? [];
+  const issues = summary?.top_contract_issues ?? [];
+
+  return (
+    <div className="modal-backdrop quality-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="quality-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head quality-modal-head">
+          <div>
+            <span className="eyebrow">数据体检中心</span>
+            <h2>数据完整性报告</h2>
+          </div>
+          <div className="quality-head-actions">
+            <button className="secondary-action" disabled={loading} onClick={onRefresh}>重新检查</button>
+            <button className="close-button" onClick={onClose}>×</button>
+          </div>
+        </div>
+
+        {loading ? (
+          <EmptyState title="正在生成报告" text="检查合约维表、交易日文件数和已有缺口报告。" />
+        ) : error ? (
+          <EmptyState title="报告加载失败" text={error} />
+        ) : summary && dates ? (
+          <>
+            <div className="quality-summary-grid">
+              <div className={`quality-status-card ${summary.status}`}>
+                <span>整体状态</span>
+                <strong>{summary.status_label}</strong>
+                <em>{timeframeLabels[summary.timeframe] ?? summary.timeframe}</em>
+              </div>
+              <div>
+                <span>在线合约</span>
+                <strong>{summary.online_symbols}</strong>
+                <em>维表 {summary.catalog_updated_at ?? "--"}</em>
+              </div>
+              <div>
+                <span>最新分区</span>
+                <strong>{formatDateBadge(summary.latest_date ?? "") || "--"}</strong>
+                <em>{summary.latest_file_count}/{summary.expected_latest_count} 文件</em>
+              </div>
+              <div>
+                <span>最新缺失/多余</span>
+                <strong>{summary.missing_latest_count}/{summary.extra_latest_count}</strong>
+                <em>按合约生命周期判断</em>
+              </div>
+              <div>
+                <span>质量报告覆盖</span>
+                <strong>{summary.quality_report.symbols}</strong>
+                <em>{summary.quality_report.source || "实时文件数"}</em>
+              </div>
+            </div>
+
+            {summary.issues.length > 0 && (
+              <div className="quality-issue-banner">
+                {summary.issues.map((item) => <span key={item}>{item}</span>)}
+              </div>
+            )}
+
+            <div className="quality-section-grid">
+              <section className="quality-panel">
+                <div className="quality-panel-head">
+                  <strong>各周期最新分区</strong>
+                  <span>检查最新交易日应有文件数</span>
+                </div>
+                <div className="quality-table-wrap">
+                  <table className="quality-table">
+                    <thead>
+                      <tr>
+                        <th>周期</th>
+                        <th>最新日期</th>
+                        <th>实际/应有</th>
+                        <th>缺失</th>
+                        <th>状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summary.timeframes.map((item) => (
+                        <tr key={item.timeframe}>
+                          <td>{timeframeLabels[item.timeframe] ?? item.timeframe}</td>
+                          <td>{formatDateBadge(item.latest_date ?? "") || "--"}</td>
+                          <td>{item.latest_file_count}/{item.expected_latest_count}</td>
+                          <td>{item.missing_latest_count}</td>
+                          <td><QualityBadge status={item.status} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section className="quality-panel">
+                <div className="quality-panel-head">
+                  <strong>已有缺口报告</strong>
+                  <span>{issues.length ? "点击合约可打开实时详情" : "当前已有报告没有发现异常合约"}</span>
+                </div>
+                <div className="quality-issue-list">
+                  {issues.length === 0 ? (
+                    <p>暂无合约级缺口记录；如需精确判断，点击合约列表每行的「报告」实时扫描。</p>
+                  ) : (
+                    issues.slice(0, 8).map((item) => (
+                      <button key={item.inst_id} onClick={() => onOpenContract(item.inst_id)}>
+                        <strong>{item.inst_id}</strong>
+                        <span>缺口 {item.gaps} · 重复 {item.duplicates} · 未确认 {item.unconfirmed}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </section>
+            </div>
+
+            <section className="quality-panel">
+              <div className="quality-panel-head">
+                <strong>交易日合约数异常</strong>
+                <span>最近 {dates.returned_count} 个交易日，异常 {abnormalDates.length} 天</span>
+              </div>
+              <div className="quality-table-wrap large">
+                <table className="quality-table">
+                  <thead>
+                    <tr>
+                      <th>日期</th>
+                      <th>周期</th>
+                      <th>实际</th>
+                      <th>应有</th>
+                      <th>缺失</th>
+                      <th>多余</th>
+                      <th>状态</th>
+                      <th>样例</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {latestDateRows.map((row) => (
+                      <tr key={row.date}>
+                        <td>{formatDateBadge(row.date)}</td>
+                        <td>{timeframeLabels[row.timeframe] ?? row.timeframe}</td>
+                        <td>{row.actual_count}</td>
+                        <td>{row.expected_count}</td>
+                        <td>{row.missing_count}</td>
+                        <td>{row.extra_count}</td>
+                        <td><QualityBadge status={row.status} /></td>
+                        <td className="quality-sample-cell">{qualitySampleText(row.missing_symbols, row.extra_symbols)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </>
+        ) : (
+          <EmptyState title="暂无报告" text="点击重新检查生成数据完整性报告。" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ContractQualityModal({
+  instId,
+  report,
+  loading,
+  error,
+  onClose,
+}: {
+  instId: string;
+  report: DataQualityContractReport | null;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  const issueFrames = report?.timeframes.filter((item) => item.status !== "ok") ?? [];
+
+  return (
+    <div className="modal-backdrop quality-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="quality-modal contract-quality-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head quality-modal-head">
+          <div>
+            <span className="eyebrow">单合约数据报告</span>
+            <h2>{instId}</h2>
+          </div>
+          <button className="close-button" onClick={onClose}>×</button>
+        </div>
+
+        {loading ? (
+          <EmptyState title="正在扫描合约" text="读取该合约所有周期的 K 线文件，检查缺口、重复和未确认数据。" />
+        ) : error ? (
+          <EmptyState title="合约报告加载失败" text={error} />
+        ) : report ? (
+          <>
+            <div className="quality-summary-grid contract-quality-grid">
+              <div className={`quality-status-card ${report.status}`}>
+                <span>整体状态</span>
+                <strong>{report.status_label}</strong>
+                <em>{report.instrument.is_online ? "在线合约" : "非在线/未知"}</em>
+              </div>
+              <div>
+                <span>上市时间</span>
+                <strong>{report.instrument.list_time_text ?? "--"}</strong>
+                <em>{report.instrument.state}</em>
+              </div>
+              <div>
+                <span>最新数据</span>
+                <strong>{report.latest_time ?? "--"}</strong>
+                <em>跨周期最大时间</em>
+              </div>
+              <div>
+                <span>异常周期</span>
+                <strong>{issueFrames.length}</strong>
+                <em>共 {report.timeframes.length} 个周期</em>
+              </div>
+            </div>
+
+            <section className="quality-panel">
+              <div className="quality-panel-head">
+                <strong>周期完整性</strong>
+                <span>覆盖率按已存在行与检测到的缺失 K 线估算</span>
+              </div>
+              <div className="quality-table-wrap">
+                <table className="quality-table">
+                  <thead>
+                    <tr>
+                      <th>周期</th>
+                      <th>文件</th>
+                      <th>行数</th>
+                      <th>覆盖率</th>
+                      <th>缺K</th>
+                      <th>重复</th>
+                      <th>未确认</th>
+                      <th>起止时间</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.timeframes.map((item) => (
+                      <tr key={item.timeframe}>
+                        <td>{timeframeLabels[item.timeframe] ?? item.timeframe}</td>
+                        <td>{item.file_count}/{item.expected_file_count}</td>
+                        <td>{formatCompact(item.row_count)}</td>
+                        <td>{item.coverage_pct ? `${item.coverage_pct.toFixed(2)}%` : "--"}</td>
+                        <td>{item.missing_bars}</td>
+                        <td>{item.duplicate_rows}</td>
+                        <td>{item.unconfirmed_rows}</td>
+                        <td>{item.start_time ?? "--"} → {item.end_time ?? "--"}</td>
+                        <td><QualityBadge status={item.status} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="quality-panel">
+              <div className="quality-panel-head">
+                <strong>缺口明细</strong>
+                <span>{issueFrames.length ? "展示每个异常周期的前 30 个缺口样例" : "没有检测到中间断 K"}</span>
+              </div>
+              {issueFrames.length === 0 ? (
+                <div className="quality-empty-note">当前合约未发现缺口、缺文件、重复或未确认 K 线。</div>
+              ) : (
+                <div className="gap-sample-list">
+                  {issueFrames.map((frame) => (
+                    <article key={frame.timeframe}>
+                      <div>
+                        <strong>{timeframeLabels[frame.timeframe] ?? frame.timeframe}</strong>
+                        <span>缺文件 {frame.missing_file_count} · 缺K {frame.missing_bars} · 重复 {frame.duplicate_rows}</span>
+                      </div>
+                      {frame.missing_dates.length > 0 && (
+                        <p>缺失日期：{frame.missing_dates.slice(0, 12).map(formatDateBadge).join("、")}{frame.missing_dates.length > 12 ? " ..." : ""}</p>
+                      )}
+                      {frame.gap_samples.length === 0 ? (
+                        <p>没有中间断 K 样例。</p>
+                      ) : (
+                        frame.gap_samples.map((gap) => (
+                          <p key={`${frame.timeframe}-${gap.prev_ts}-${gap.next_ts}`}>
+                            {gap.missing_start ?? "--"} ~ {gap.missing_end ?? "--"}，缺 {gap.missing_count} 根
+                          </p>
+                        ))
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        ) : (
+          <EmptyState title="等待报告" text="正在准备合约数据完整性报告。" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QualityBadge({ status }: { status: "ok" | "warning" | "fail" }) {
+  return <span className={`quality-badge ${status}`}>{qualityStatusText(status)}</span>;
 }
 
 function IndicatorProductionPage({ summary }: { summary: DataSummary | null }) {
@@ -2653,6 +3080,10 @@ function metadataOperatorLabel(value: string) {
   return metadataOperatorOptions.find((item) => item.value === value)?.label ?? value;
 }
 
+function isTimeoutMessage(message: string | null) {
+  return Boolean(message && /超时|timeout|timed out|abort/i.test(message));
+}
+
 function uniqueValueConditions(
   conditions: MetadataCondition[],
   date: string,
@@ -2946,7 +3377,6 @@ function ConditionCard(props: {
 function EmptyState({ title, text }: { title: string; text: string }) {
   return (
     <div className="empty-state">
-      <div className="radar" />
       <strong>{title}</strong>
       <p>{text}</p>
     </div>
@@ -3005,4 +3435,19 @@ function numberTone(value: number) {
   if (value > 0) return "up";
   if (value < 0) return "down";
   return "";
+}
+
+function qualityStatusText(status: "ok" | "warning" | "fail") {
+  return status === "ok" ? "正常" : status === "warning" ? "轻微异常" : "严重异常";
+}
+
+function qualitySampleText(missing: string[], extra: string[]) {
+  const parts: string[] = [];
+  if (missing.length > 0) {
+    parts.push(`缺：${missing.slice(0, 3).join("、")}${missing.length > 3 ? "..." : ""}`);
+  }
+  if (extra.length > 0) {
+    parts.push(`多：${extra.slice(0, 3).join("、")}${extra.length > 3 ? "..." : ""}`);
+  }
+  return parts.join("；") || "--";
 }

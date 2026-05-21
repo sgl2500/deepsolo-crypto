@@ -117,6 +117,131 @@ export type ContractListResponse = {
   rows: ContractRow[];
 };
 
+export type DataQualityStatus = "ok" | "warning" | "fail";
+
+export type DataQualityTimeframeStatus = {
+  timeframe: string;
+  latest_date: string | null;
+  latest_file_count: number;
+  max_file_count: number;
+  date_count: number;
+  expected_latest_count: number;
+  missing_latest_count: number;
+  extra_latest_count: number;
+  status: DataQualityStatus;
+};
+
+export type DataQualityContractIssue = {
+  inst_id: string;
+  timeframe: string;
+  rows: number;
+  start: string | null;
+  end: string | null;
+  gaps: number;
+  duplicates: number;
+  unconfirmed: number;
+};
+
+export type DataQualitySummary = {
+  root: string;
+  catalog_updated_at: string | null;
+  generated_at: number;
+  timeframe: string;
+  status: DataQualityStatus;
+  status_label: string;
+  online_symbols: number;
+  latest_date: string | null;
+  latest_file_count: number;
+  expected_latest_count: number;
+  missing_latest_count: number;
+  extra_latest_count: number;
+  missing_latest_symbols: string[];
+  extra_latest_symbols: string[];
+  quality_report: {
+    source: string;
+    symbols: number;
+    rows_total: number;
+    symbols_with_gaps: number;
+    symbols_with_duplicates: number;
+    symbols_with_unconfirmed: number;
+  };
+  timeframes: DataQualityTimeframeStatus[];
+  top_contract_issues: DataQualityContractIssue[];
+  issues: string[];
+};
+
+export type DataQualityDateRow = {
+  date: string;
+  timeframe: string;
+  expected_count: number;
+  actual_count: number;
+  missing_count: number;
+  extra_count: number;
+  missing_symbols: string[];
+  extra_symbols: string[];
+  status: DataQualityStatus;
+  status_label: string;
+};
+
+export type DataQualityDateReport = {
+  timeframe: string;
+  generated_at: number;
+  total_dates: number;
+  returned_count: number;
+  rows: DataQualityDateRow[];
+};
+
+export type DataQualityGapSample = {
+  prev_ts: number;
+  prev_time: string | null;
+  next_ts: number;
+  next_time: string | null;
+  missing_count: number;
+  missing_start: string | null;
+  missing_end: string | null;
+};
+
+export type DataQualityContractTimeframe = {
+  timeframe: string;
+  status: DataQualityStatus;
+  status_label: string;
+  row_count: number;
+  unique_row_count: number;
+  file_count: number;
+  expected_file_count: number;
+  missing_file_count: number;
+  missing_dates: string[];
+  start_ts: number | null;
+  start_time: string | null;
+  end_ts: number | null;
+  end_time: string | null;
+  gap_events: number;
+  missing_bars: number;
+  gap_samples: DataQualityGapSample[];
+  duplicate_rows: number;
+  unconfirmed_rows: number;
+  bad_rows: number;
+  coverage_pct: number;
+};
+
+export type DataQualityContractReport = {
+  inst_id: string;
+  symbol: string;
+  generated_at: number;
+  status: DataQualityStatus;
+  status_label: string;
+  latest_time: string | null;
+  instrument: {
+    state: string;
+    is_online: boolean;
+    list_time: number | null;
+    list_time_text: string | null;
+    first_seen_at: string | null;
+    last_seen_at: string | null;
+  };
+  timeframes: DataQualityContractTimeframe[];
+};
+
 export type ContractKlineRow = {
   ts: number | null;
   time: string | null;
@@ -294,6 +419,35 @@ export async function fetchActiveContracts(params: {
   if (params.date) search.set("date", params.date);
   if (params.query) search.set("query", params.query);
   return request(`/api/contracts/active?${search.toString()}`);
+}
+
+export async function fetchDataQualitySummary(params: {
+  timeframe?: string;
+  force?: boolean;
+} = {}): Promise<DataQualitySummary> {
+  const search = new URLSearchParams();
+  search.set("timeframe", params.timeframe ?? "1m");
+  if (params.force) search.set("force", "true");
+  return request(`/api/data-quality/summary?${search.toString()}`);
+}
+
+export async function fetchDataQualityDates(params: {
+  timeframe?: string;
+  limit?: number;
+  force?: boolean;
+} = {}): Promise<DataQualityDateReport> {
+  const search = new URLSearchParams();
+  search.set("timeframe", params.timeframe ?? "1m");
+  search.set("limit", `${params.limit ?? 90}`);
+  if (params.force) search.set("force", "true");
+  return request(`/api/data-quality/dates?${search.toString()}`);
+}
+
+export async function fetchDataQualityContract(
+  instId: string,
+  gapLimit = 30,
+): Promise<DataQualityContractReport> {
+  return request(`/api/data-quality/contracts/${encodeURIComponent(instId)}?gap_limit=${gapLimit}`);
 }
 
 export async function fetchContractKlineWindow(params: {
@@ -476,14 +630,64 @@ export async function queryScreener(params: {
     search.set("metadata_filters", JSON.stringify(params.metadataFilters));
   }
   search.set("limit", "200");
-  return request(`/api/screener/query?${search.toString()}`);
+  return request(`/api/screener/query?${search.toString()}`, undefined, {
+    timeoutMs: 45_000,
+    timeoutMessage: "选币接口请求超时：超过 45 秒还没有返回，请检查脚本指标是否过慢或数据量过大。",
+  });
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...init });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+type RequestOptions = {
+  timeoutMs?: number;
+  timeoutMessage?: string;
+};
+
+async function request<T>(path: string, init?: RequestInit, options: RequestOptions = {}): Promise<T> {
+  const controller = options.timeoutMs ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  if (controller && options.timeoutMs) {
+    timer = setTimeout(() => controller.abort(), options.timeoutMs);
+    if (init?.signal) {
+      if (init.signal.aborted) {
+        controller.abort();
+      } else {
+        init.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
   }
-  return response.json() as Promise<T>;
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store",
+      ...init,
+      signal: controller?.signal ?? init?.signal,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(apiErrorMessage(text, response.status));
+    }
+    return response.json() as Promise<T>;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(options.timeoutMessage || "请求超时，请稍后重试。");
+    }
+    throw err;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function apiErrorMessage(text: string, status: number) {
+  if (!text) return `Request failed: ${status}`;
+  try {
+    const payload = JSON.parse(text) as { detail?: unknown; message?: unknown };
+    if (typeof payload.detail === "string") return payload.detail;
+    if (Array.isArray(payload.detail)) return payload.detail.map(String).join("；");
+    if (typeof payload.message === "string") return payload.message;
+  } catch {
+    // Plain-text error body.
+  }
+  return text;
 }
