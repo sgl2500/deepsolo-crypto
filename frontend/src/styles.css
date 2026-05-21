@@ -4024,3 +4024,414 @@ tbody tr:hover {
     position: static;
   }
 }
+
+.backtest-page {
+  padding-bottom: 24px;
+  background:
+    radial-gradient(circle at 86% 12%, rgba(9, 182, 162, 0.09), transparent 28%),
+    radial-gradient(circle at 10% 88%, rgba(22, 119, 255, 0.08), transparent 24%),
+    #ffffff;
+}
+
+.backtest-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  padding: 0 24px 18px;
+}
+
+.backtest-card {
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e4e9f0;
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(6, 23, 36, 0.06);
+}
+
+.backtest-card-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.backtest-card-head strong {
+  color: #172033;
+  font-size: 16px;
+}
+
+.backtest-card-head em {
+  color: #667085;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.backtest-form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.backtest-form .field {
+  display: grid;
+  gap: 6px;
+}
+
+.backtest-form .field.wide {
+  grid-column: span 2;
+}
+
+.backtest-form .field span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.backtest-form input,
+.backtest-form select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  color: #172033;
+  background: #f8fbff;
+  border: 1px solid #dbe6f2;
+  border-radius: 9px;
+  outline: 0;
+}
+
+.backtest-form input:focus,
+.backtest-form select:focus {
+  border-color: #2f80ed;
+  box-shadow: 0 0 0 3px rgba(47, 128, 237, 0.12);
+}
+
+.backtest-hint {
+  margin: 14px 0 0;
+  color: #526071;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.backtest-runs {
+  min-height: 260px;
+}
+
+.backtest-run-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.backtest-run-list button {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  background: #f8fbff;
+  border: 1px solid #e0e9f4;
+  border-radius: 10px;
+}
+
+.backtest-run-list button.active {
+  background: linear-gradient(135deg, rgba(47, 128, 237, 0.12), rgba(9, 182, 162, 0.08));
+  border-color: #8cc7ff;
+}
+
+.backtest-run-list strong {
+  overflow: hidden;
+  color: #172033;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-run-list span,
+.backtest-run-list em {
+  color: #667085;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.backtest-error {
+  margin: 0 24px 16px;
+}
+
+.backtest-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 12px;
+  padding: 0 24px 16px;
+}
+
+.backtest-stat {
+  padding: 14px 16px;
+  background: #f8fbff;
+  border: 1px solid #e5edf6;
+  border-radius: 12px;
+}
+
+.backtest-stat span {
+  display: block;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.backtest-stat strong {
+  display: block;
+  margin-top: 6px;
+  color: #172033;
+  font-size: 22px;
+  font-family: "DIN Alternate", "Avenir Next", sans-serif;
+}
+
+.backtest-result-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.7fr);
+  gap: 16px;
+  padding: 0 24px 16px;
+}
+
+.backtest-equity-chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.backtest-equity-chart rect {
+  fill: #f7fbff;
+}
+
+.backtest-equity-chart line {
+  stroke: #dce7f3;
+  stroke-dasharray: 4 6;
+}
+
+.backtest-equity-chart polyline {
+  fill: none;
+  stroke: #1677ff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.backtest-equity-chart circle {
+  fill: #09b6a2;
+  stroke: #ffffff;
+  stroke-width: 3;
+}
+
+.backtest-equity-chart text {
+  fill: #667085;
+  font-size: 12px;
+  text-anchor: end;
+}
+
+.backtest-equity-chart text.end {
+  text-anchor: end;
+}
+
+.equity-chart-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: #667085;
+  font-size: 13px;
+}
+
+.equity-chart-caption b {
+  color: #172033;
+}
+
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.diagnostic-grid span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  color: #667085;
+  background: #f8fbff;
+  border: 1px solid #e5edf6;
+  border-radius: 10px;
+}
+
+.diagnostic-grid b {
+  color: #172033;
+}
+
+.backtest-table-card,
+.checkpoint-strip {
+  margin: 0 24px 16px;
+}
+
+.backtest-table-scroll {
+  overflow: auto;
+  max-height: 430px;
+}
+
+.backtest-table {
+  width: 100%;
+  min-width: 1180px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.backtest-table th,
+.backtest-table td {
+  height: 42px;
+  padding: 0 10px;
+  border-bottom: 1px solid #edf1f6;
+  white-space: nowrap;
+}
+
+.backtest-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #172033;
+  text-align: left;
+  background: #f7fbff;
+}
+
+.backtest-table td {
+  color: #3d4b5c;
+}
+
+.checkpoint-strip > div:last-child {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.checkpoint-strip span {
+  padding: 7px 9px;
+  color: #475467;
+  font-size: 12px;
+  background: #f8fbff;
+  border: 1px solid #e5edf6;
+  border-radius: 999px;
+}
+
+@media (max-width: 1180px) {
+  .backtest-layout,
+  .backtest-result-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-summary-grid {
+    grid-template-columns: repeat(3, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .backtest-layout,
+  .backtest-summary-grid,
+  .backtest-result-grid {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .backtest-form-grid,
+  .backtest-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-form .field.wide {
+    grid-column: span 1;
+  }
+
+  .backtest-table-card,
+  .checkpoint-strip,
+  .backtest-error {
+    margin-right: 12px;
+    margin-left: 12px;
+  }
+}
+
+.kline-trade-legend {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0 24px 14px;
+  background: #fbfcfe;
+}
+
+.kline-trade-legend span {
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 900;
+  border-radius: 999px;
+}
+
+.kline-trade-legend .buy {
+  color: #b42318;
+  background: #fff1f0;
+  border: 1px solid #ffccc7;
+}
+
+.kline-trade-legend .sell {
+  color: #047857;
+  background: #ecfdf3;
+  border: 1px solid #a7f3d0;
+}
+
+.kline-trade-marker {
+  pointer-events: none;
+}
+
+.kline-trade-marker line {
+  stroke-dasharray: 5 5;
+  stroke-width: 1.4;
+}
+
+.kline-trade-marker circle {
+  stroke: #ffffff;
+  stroke-width: 2;
+}
+
+.kline-trade-marker text {
+  font-size: 15px;
+  font-weight: 900;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: rgba(7, 24, 39, 0.88);
+  stroke-width: 4px;
+}
+
+.kline-trade-marker.buy line {
+  stroke: #ff8a7a;
+}
+
+.kline-trade-marker.buy text {
+  fill: #ff8a7a;
+}
+
+.kline-trade-marker.buy circle,
+.kline-trade-marker.buy polygon {
+  fill: #ff4d4f;
+}
+
+.kline-trade-marker.sell line {
+  stroke: #4de0c7;
+}
+
+.kline-trade-marker.sell text {
+  fill: #4de0c7;
+}
+
+.kline-trade-marker.sell circle,
+.kline-trade-marker.sell polygon {
+  fill: #12b76a;
+}
+
+.backtest-symbol-with-kline {
+  justify-content: flex-start;
+}

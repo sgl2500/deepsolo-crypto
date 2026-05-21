@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .backtest_service import backtest_service
 from .data_quality_service import data_quality_service
 from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
@@ -53,6 +54,22 @@ class ScreenerFavoriteCreate(BaseModel):
     min_vol_quote_15m: str = ""
     sort_by: str = "ret_15m"
     metadata_conditions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BacktestRunRequest(BaseModel):
+    favorite_id: str = Field(min_length=1)
+    name: str = ""
+    start_date: str
+    end_date: str
+    signal_timeframe: str = "1H"
+    signal_mode: str = "daily"
+    entry_timeframe: str = "1m"
+    hold_hours: int = Field(default=24, ge=1, le=720)
+    position_usdt: float = Field(default=100, gt=0)
+    max_positions: int = Field(default=5, ge=1, le=100)
+    fee_bps_per_side: float = Field(default=5, ge=0)
+    slippage_bps_per_side: float = Field(default=5, ge=0)
+    checkpoint_limit: int = Field(default=500, ge=1, le=5000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -160,7 +177,7 @@ def contract_update_deploy_status(
 def contract_kline_window(
     inst_id: str,
     timeframe: str = "1m",
-    date: str = Query(...),
+    date: str | None = None,
     anchor_ts: int | None = None,
     before: int = Query(default=33, ge=1, le=300),
     after: int = Query(default=33, ge=0, le=300),
@@ -357,6 +374,29 @@ def delete_screener_favorite(favorite_id: str) -> dict:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"deleted": deleted}
+
+
+@app.get("/api/backtests/runs")
+def backtest_runs() -> dict:
+    return {"items": backtest_service.list_runs()}
+
+
+@app.get("/api/backtests/runs/{run_id}")
+def backtest_run(run_id: str) -> dict:
+    item = backtest_service.get_run(run_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"回测记录不存在：{run_id}")
+    return item
+
+
+@app.post("/api/backtests/runs", status_code=201)
+def create_backtest_run(payload: BacktestRunRequest) -> dict:
+    try:
+        return backtest_service.create_run(payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/screener/query")

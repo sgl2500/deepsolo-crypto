@@ -39,6 +39,7 @@ def query_screener(
     sort_dir: str = "desc",
     metadata_filters: list[dict[str, Any]] | None = None,
     limit: int = 100,
+    script_values_cache: dict[tuple[str, str, str], dict[str, list[dict[str, str]]]] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     selected_date = date or data_source_service.default_date(timeframe)
@@ -49,7 +50,7 @@ def query_screener(
     files = data_source_service.contract_files(timeframe, selected_date)
     metadata_filter_specs = _prepare_metadata_filter_specs(metadata_filters or [], selected_date)
     metadata_period_files = _metadata_period_files(metadata_filter_specs)
-    metadata_script_values = _metadata_script_values(metadata_filter_specs)
+    metadata_script_values = _metadata_script_values(metadata_filter_specs, script_values_cache)
     rows: list[dict[str, Any]] = []
     condition_stats = {
         "min_ret_15m": 0,
@@ -421,7 +422,10 @@ def _metadata_period_files(filters: list[dict[str, Any]]) -> dict[tuple[str, str
     }
 
 
-def _metadata_script_values(filters: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, list[dict[str, str]]]]:
+def _metadata_script_values(
+    filters: list[dict[str, Any]],
+    cache: dict[tuple[str, str, str], dict[str, list[dict[str, str]]]] | None = None,
+) -> dict[tuple[str, str], dict[str, list[dict[str, str]]]]:
     outputs: dict[tuple[str, str], dict[str, list[dict[str, str]]]] = {}
     script_conditions = [
         condition
@@ -432,14 +436,19 @@ def _metadata_script_values(filters: list[dict[str, Any]]) -> dict[tuple[str, st
         indicator = condition["_indicator"]
         indicator_id = str(indicator.get("id"))
         target_date = str(condition.get("_target_date") or "")
+        input_timeframe = str(indicator.get("storage_period") or "1m")
         key = (indicator_id, target_date)
         if key in outputs:
+            continue
+        cache_key = (indicator_id, target_date, input_timeframe)
+        if cache is not None and cache_key in cache:
+            outputs[key] = cache[cache_key]
             continue
 
         result = script_indicator_service.trial_run(
             indicator_id,
             date=target_date,
-            input_timeframe=str(indicator.get("storage_period") or "1m"),
+            input_timeframe=input_timeframe,
             limit=1000,
         )
         if result.get("timed_out"):
@@ -448,7 +457,10 @@ def _metadata_script_values(filters: list[dict[str, Any]]) -> dict[tuple[str, st
         if not result.get("success"):
             detail = result.get("stderr") or "脚本执行失败，无法参与组合查询"
             raise ValueError(f"{indicator.get('name_zh') or indicator_id}：{detail}")
-        outputs[key] = _group_script_rows(result.get("rows", []))
+        grouped_rows = _group_script_rows(result.get("rows", []))
+        if cache is not None:
+            cache[cache_key] = grouped_rows
+        outputs[key] = grouped_rows
     return outputs
 
 

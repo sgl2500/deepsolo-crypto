@@ -3,6 +3,8 @@ import ConfigProvider from "antd/es/config-provider";
 import Table from "antd/es/table";
 import type { ColumnsType } from "antd/es/table";
 import {
+  BacktestRun,
+  BacktestTrade,
   ContractListResponse,
   ContractKlineResponse,
   ContractKlineRow,
@@ -20,12 +22,15 @@ import {
   ScreenerMetadataFilterPayload,
   ScreenerResponse,
   ScreenerRow,
+  createBacktestRun,
   createScreenerFavorite,
   TimeframeSummary,
   createIndicator,
   deleteIndicator,
   deleteScreenerFavorite,
   fetchActiveContracts,
+  fetchBacktestRun,
+  fetchBacktestRuns,
   fetchContractKlineWindow,
   fetchContractUpdateStatus,
   fetchDataQualityContract,
@@ -44,7 +49,7 @@ import {
   updateIndicator,
 } from "./api";
 
-const navItems = ["选币查询", "合约列表", "指标生产", "指标仓库"];
+const navItems = ["选币查询", "回测验证", "合约列表", "指标生产", "指标仓库"];
 const timeframeLabels: Record<string, string> = {
   "1m": "1分钟",
   "5m": "5分钟",
@@ -57,6 +62,19 @@ const klinePeriodOptions = [
   { value: "1H", label: "1小时" },
   { value: "5m", label: "5分钟" },
   { value: "1m", label: "1分钟" },
+];
+const backtestSignalTimeframeOptions = [
+  { value: "1H", label: "1小时信号" },
+  { value: "1D", label: "日线信号" },
+];
+const backtestEntryTimeframeOptions = [
+  { value: "1m", label: "1分钟成交" },
+  { value: "5m", label: "5分钟成交" },
+  { value: "1H", label: "1小时成交" },
+];
+const backtestSignalModeOptions = [
+  { value: "daily", label: "每日一次" },
+  { value: "each_bar_close", label: "逐根K线" },
 ];
 
 const metadataOperatorOptions = [
@@ -95,6 +113,14 @@ type MetadataCondition = MetadataConditionDraft & {
 type ScreenerTableRow = ScreenerRow & {
   key: string;
   rowIndex: number;
+};
+
+type KlineTradeMarker = {
+  side: "buy" | "sell";
+  ts: number;
+  price: number;
+  label: string;
+  time: string;
 };
 
 export default function App() {
@@ -415,7 +441,7 @@ export default function App() {
               onClick={() => setActivePage(item)}
             >
               <span>{item}</span>
-              <b>{item === "指标仓库" ? "CORE" : index === 0 ? "LIVE" : "MVP"}</b>
+              <b>{item === "指标仓库" ? "CORE" : item === "回测验证" ? "BETA" : index === 0 ? "LIVE" : "MVP"}</b>
             </button>
           ))}
         </nav>
@@ -429,6 +455,8 @@ export default function App() {
       <main className="workspace">
         {activePage === "指标仓库" ? (
           <IndicatorWarehousePage summary={summary} />
+        ) : activePage === "回测验证" ? (
+          <BacktestPage summary={summary} />
         ) : activePage === "合约列表" ? (
           <ContractListPage summary={summary} onSummaryRefresh={() => loadSummary(true)} />
         ) : activePage === "指标生产" ? (
@@ -787,6 +815,7 @@ function ContractKlineModal({
   data,
   loading,
   error,
+  markers = [],
   onPeriodChange,
   onClose,
 }: {
@@ -795,6 +824,7 @@ function ContractKlineModal({
   data: ContractKlineResponse | null;
   loading: boolean;
   error: string | null;
+  markers?: KlineTradeMarker[];
   onPeriodChange: (period: string) => void;
   onClose: () => void;
 }) {
@@ -851,7 +881,16 @@ function ContractKlineModal({
                 <strong>{data.before_count}/{data.after_count}</strong>
               </div>
             </div>
-            <KlineChart rows={data.rows} anchorIndex={data.anchor_index} />
+            {markers.length > 0 && (
+              <div className="kline-trade-legend">
+                {markers.map((marker) => (
+                  <span className={marker.side} key={`${marker.side}-${marker.ts}`}>
+                    {marker.label} {marker.time} @{formatOptionalNumber(marker.price)}
+                  </span>
+                ))}
+              </div>
+            )}
+            <KlineChart rows={data.rows} anchorIndex={data.anchor_index} markers={markers} />
           </>
         ) : (
           <EmptyState title="等待K线数据" text="点击合约旁的 K 图标加载前后 33 根 K 线。" />
@@ -861,7 +900,15 @@ function ContractKlineModal({
   );
 }
 
-function KlineChart({ rows, anchorIndex }: { rows: ContractKlineRow[]; anchorIndex: number }) {
+function KlineChart({
+  rows,
+  anchorIndex,
+  markers = [],
+}: {
+  rows: ContractKlineRow[];
+  anchorIndex: number;
+  markers?: KlineTradeMarker[];
+}) {
   const [activeIndex, setActiveIndex] = useState(anchorIndex);
   const [lockedIndex, setLockedIndex] = useState<number | null>(null);
 
@@ -883,8 +930,18 @@ function KlineChart({ rows, anchorIndex }: { rows: ContractKlineRow[]; anchorInd
   const plotWidth = width - padding.left - padding.right;
   const pricePlotHeight = height - padding.top - padding.bottom - volumeHeight - volumeGap;
   const volumeTop = padding.top + pricePlotHeight + volumeGap;
-  const maxHigh = Math.max(...candles.map((row) => row.high));
-  const minLow = Math.min(...candles.map((row) => row.low));
+  const visibleMarkers = markers
+    .map((marker) => {
+      const index = klineMarkerIndex(rows, marker.ts);
+      const row = index === null ? null : rows[index];
+      if (index === null || !row || !hasKlineNumbers(row)) return null;
+      const price = Number.isFinite(marker.price) ? marker.price : row.close;
+      return { ...marker, index, price };
+    })
+    .filter((item): item is KlineTradeMarker & { index: number; price: number } => Boolean(item));
+  const markerPrices = visibleMarkers.map((marker) => marker.price);
+  const maxHigh = Math.max(...candles.map((row) => row.high), ...markerPrices);
+  const minLow = Math.min(...candles.map((row) => row.low), ...markerPrices);
   const span = maxHigh - minLow || Math.max(1, maxHigh * 0.01);
   const yFor = (value: number) => padding.top + ((maxHigh - value) / span) * pricePlotHeight;
   const step = plotWidth / Math.max(1, rows.length - 1);
@@ -999,6 +1056,23 @@ function KlineChart({ rows, anchorIndex }: { rows: ContractKlineRow[]; anchorInd
             />
           );
         })}
+        {visibleMarkers.map((marker) => {
+          const x = padding.left + marker.index * step;
+          const y = yFor(marker.price);
+          const isBuy = marker.side === "buy";
+          const labelY = isBuy ? y + 26 : y - 18;
+          const triangle = isBuy
+            ? `${x - 7},${y + 12} ${x + 7},${y + 12} ${x},${y + 1}`
+            : `${x - 7},${y - 12} ${x + 7},${y - 12} ${x},${y - 1}`;
+          return (
+            <g className={`kline-trade-marker ${marker.side}`} key={`${marker.side}-${marker.ts}-${marker.index}`}>
+              <line x1={x} x2={x} y1={padding.top} y2={volumeTop - 12} />
+              <circle cx={x} cy={y} r="4.5" />
+              <polygon points={triangle} />
+              <text x={x} y={labelY}>{marker.label}</text>
+            </g>
+          );
+        })}
         <text className="kline-axis-text" x={padding.left} y={height - 12}>
           {rows[0]?.time ?? ""}
         </text>
@@ -1006,6 +1080,533 @@ function KlineChart({ rows, anchorIndex }: { rows: ContractKlineRow[]; anchorInd
           {rows.at(-1)?.time ?? ""}
         </text>
       </svg>
+    </div>
+  );
+}
+
+function BacktestPage({ summary }: { summary: DataSummary | null }) {
+  const initialRange = suggestedBacktestRange(summary, "1H", "daily");
+  const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
+  const [runs, setRuns] = useState<BacktestRun[]>([]);
+  const [activeRun, setActiveRun] = useState<BacktestRun | null>(null);
+  const [form, setForm] = useState({
+    favoriteId: "",
+    name: "",
+    startDate: initialRange.start,
+    endDate: initialRange.end,
+    signalTimeframe: "1H",
+    signalMode: "daily",
+    entryTimeframe: "1m",
+    holdHours: "24",
+    positionUsdt: "100",
+    maxPositions: "5",
+    feeBps: "5",
+    slippageBps: "5",
+  });
+  const [loadingFavorites, setLoadingFavorites] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [loadingRun, setLoadingRun] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [klineTarget, setKlineTarget] = useState<{ instId: string; anchorTs?: number | null } | null>(null);
+  const [klinePeriod, setKlinePeriod] = useState("1m");
+  const [klineData, setKlineData] = useState<ContractKlineResponse | null>(null);
+  const [klineLoading, setKlineLoading] = useState(false);
+  const [klineError, setKlineError] = useState<string | null>(null);
+  const [klineMarkers, setKlineMarkers] = useState<KlineTradeMarker[]>([]);
+
+  useEffect(() => {
+    void loadFavorites();
+    void loadRuns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const nextRange = suggestedBacktestRange(summary, form.signalTimeframe, form.signalMode);
+    setForm((current) => ({
+      ...current,
+      startDate: current.startDate || nextRange.start,
+      endDate: current.endDate || nextRange.end,
+    }));
+  }, [summary, form.signalTimeframe, form.signalMode]);
+
+  async function loadFavorites() {
+    setLoadingFavorites(true);
+    setError(null);
+    try {
+      const data = await fetchScreenerFavorites();
+      setFavorites(data.items);
+      setForm((current) => ({
+        ...current,
+        favoriteId: current.favoriteId || data.items[0]?.id || "",
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "收藏条件加载失败");
+    } finally {
+      setLoadingFavorites(false);
+    }
+  }
+
+  async function loadRuns() {
+    try {
+      const data = await fetchBacktestRuns();
+      setRuns(data.items);
+      setActiveRun((current) => current ?? data.items[0] ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "回测记录加载失败");
+    }
+  }
+
+  async function openRun(runId: string) {
+    setLoadingRun(true);
+    setError(null);
+    try {
+      const run = await fetchBacktestRun(runId);
+      setActiveRun(run);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "回测详情加载失败");
+    } finally {
+      setLoadingRun(false);
+    }
+  }
+
+  async function startBacktest() {
+    if (!form.favoriteId) {
+      setError("请先选择一个收藏条件。");
+      return;
+    }
+    setRunning(true);
+    setError(null);
+    try {
+      const run = await createBacktestRun({
+        favorite_id: form.favoriteId,
+        name: form.name.trim(),
+        start_date: form.startDate,
+        end_date: form.endDate,
+        signal_timeframe: form.signalTimeframe,
+        signal_mode: form.signalMode as "daily" | "each_bar_close",
+        entry_timeframe: form.entryTimeframe,
+        hold_hours: Number(form.holdHours),
+        position_usdt: Number(form.positionUsdt),
+        max_positions: Number(form.maxPositions),
+        fee_bps_per_side: Number(form.feeBps),
+        slippage_bps_per_side: Number(form.slippageBps),
+        checkpoint_limit: form.signalMode === "each_bar_close" ? 500 : 1000,
+      });
+      setActiveRun(run);
+      if (run.status === "failed") {
+        setError(run.error || "回测失败");
+      }
+      void loadRuns();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "回测启动失败");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function updateForm(key: keyof typeof form, value: string) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function changeSignalTimeframe(value: string) {
+    const nextRange = suggestedBacktestRange(summary, value, form.signalMode);
+    setForm((current) => ({
+      ...current,
+      signalTimeframe: value,
+      signalMode: value === "1D" && current.signalMode === "each_bar_close" ? "daily" : current.signalMode,
+      startDate: nextRange.start,
+      endDate: nextRange.end,
+    }));
+  }
+
+  function changeSignalMode(value: string) {
+    const normalizedMode = form.signalTimeframe === "1D" && value === "each_bar_close" ? "daily" : value;
+    const nextRange = suggestedBacktestRange(summary, form.signalTimeframe, normalizedMode);
+    setForm((current) => ({
+      ...current,
+      signalMode: normalizedMode,
+      startDate: nextRange.start,
+      endDate: nextRange.end,
+    }));
+  }
+
+  async function openTradeKline(trade: BacktestTrade, period: string) {
+    const target = { instId: trade.inst_id, anchorTs: trade.entry_ts };
+    const markers = tradeKlineMarkers(trade);
+    const normalizedPeriod = defaultTradeKlinePeriod(trade, period);
+    setKlineTarget(target);
+    setKlinePeriod(normalizedPeriod);
+    setKlineMarkers(markers);
+    await loadTradeKlineWindow(target, normalizedPeriod, markers);
+  }
+
+  async function changeTradeKlinePeriod(period: string) {
+    if (!klineTarget) return;
+    setKlinePeriod(period);
+    await loadTradeKlineWindow(klineTarget, period, klineMarkers);
+  }
+
+  async function loadTradeKlineWindow(
+    target: { instId: string; anchorTs?: number | null },
+    period: string,
+    markers: KlineTradeMarker[],
+  ) {
+    setKlineData(null);
+    setKlineLoading(true);
+    setKlineError(null);
+    try {
+      const windowSize = tradeKlineWindowSize(period, target.anchorTs, markers);
+      const data = await fetchContractKlineWindow({
+        instId: target.instId,
+        timeframe: period,
+        anchorTs: target.anchorTs,
+        before: windowSize.before,
+        after: windowSize.after,
+      });
+      setKlineData(data);
+    } catch (err) {
+      setKlineError(err instanceof Error ? err.message : "成交K线加载失败");
+    } finally {
+      setKlineLoading(false);
+    }
+  }
+
+  const selectedFavorite = favorites.find((item) => item.id === form.favoriteId) ?? null;
+  const result = activeRun?.result ?? null;
+  const summaryStats = result?.summary;
+  const trades = result?.trades ?? [];
+  const checkpoints = result?.checkpoints ?? [];
+  const signalModeDisabled = form.signalTimeframe === "1D";
+  const tradeKlinePeriod = activeRun?.config.entry_timeframe ?? form.entryTimeframe;
+
+  return (
+    <section className="metadata-page backtest-page">
+      <div className="metadata-page-head">
+        <div>
+          <h1>回测验证</h1>
+          <p className="contract-page-subtitle">
+            直接复用收藏的选币条件生成信号，按下一根K线开盘买入，固定持仓后卖出。
+          </p>
+        </div>
+        <div className="metadata-actions">
+          <button className="secondary-action" onClick={() => { void loadFavorites(); void loadRuns(); }}>
+            刷新
+          </button>
+          <button className="primary-action" disabled={running || loadingFavorites} onClick={() => void startBacktest()}>
+            {running ? "回测中..." : "开始回测"}
+          </button>
+        </div>
+      </div>
+
+      <div className="backtest-layout">
+        <form
+          className="backtest-card backtest-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void startBacktest();
+          }}
+        >
+          <div className="backtest-card-head">
+            <span className="eyebrow">Signal Setup</span>
+            <strong>信号与成交规则</strong>
+          </div>
+          <div className="backtest-form-grid">
+            <label className="field wide">
+              <span>收藏条件</span>
+              <select value={form.favoriteId} onChange={(event) => updateForm("favoriteId", event.target.value)}>
+                {favorites.length === 0 ? (
+                  <option value="">暂无收藏条件</option>
+                ) : (
+                  favorites.map((favorite) => (
+                    <option key={favorite.id} value={favorite.id}>
+                      {favorite.name} ({favorite.condition_count} 条)
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+            <label className="field wide">
+              <span>回测名称</span>
+              <input
+                placeholder={selectedFavorite ? `${selectedFavorite.name} 回测` : "可不填，系统自动命名"}
+                value={form.name}
+                onChange={(event) => updateForm("name", event.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>开始日期</span>
+              <input type="date" value={form.startDate} onChange={(event) => updateForm("startDate", event.target.value)} />
+            </label>
+            <label className="field">
+              <span>结束日期</span>
+              <input type="date" value={form.endDate} onChange={(event) => updateForm("endDate", event.target.value)} />
+            </label>
+            <label className="field">
+              <span>信号周期</span>
+              <select value={form.signalTimeframe} onChange={(event) => changeSignalTimeframe(event.target.value)}>
+                {backtestSignalTimeframeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>信号频率</span>
+              <select value={form.signalMode} onChange={(event) => changeSignalMode(event.target.value)}>
+                {backtestSignalModeOptions.map((option) => (
+                  <option
+                    disabled={signalModeDisabled && option.value === "each_bar_close"}
+                    key={option.value}
+                    value={option.value}
+                  >
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>成交K线</span>
+              <select value={form.entryTimeframe} onChange={(event) => updateForm("entryTimeframe", event.target.value)}>
+                {backtestEntryTimeframeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>持仓小时</span>
+              <input min="1" max="720" type="number" value={form.holdHours} onChange={(event) => updateForm("holdHours", event.target.value)} />
+            </label>
+            <label className="field">
+              <span>单笔U</span>
+              <input min="1" type="number" value={form.positionUsdt} onChange={(event) => updateForm("positionUsdt", event.target.value)} />
+            </label>
+            <label className="field">
+              <span>最多持仓</span>
+              <input min="1" max="100" type="number" value={form.maxPositions} onChange={(event) => updateForm("maxPositions", event.target.value)} />
+            </label>
+            <label className="field">
+              <span>手续费bps</span>
+              <input min="0" step="0.1" type="number" value={form.feeBps} onChange={(event) => updateForm("feeBps", event.target.value)} />
+            </label>
+            <label className="field">
+              <span>滑点bps</span>
+              <input min="0" step="0.1" type="number" value={form.slippageBps} onChange={(event) => updateForm("slippageBps", event.target.value)} />
+            </label>
+          </div>
+          <p className="backtest-hint">
+            防未来函数：信号在当前K线收盘后才生效，成交价使用下一根 {timeframeLabels[form.entryTimeframe] ?? form.entryTimeframe} K线开盘价。
+          </p>
+        </form>
+
+        <aside className="backtest-card backtest-runs">
+          <div className="backtest-card-head">
+            <span className="eyebrow">SQLite Runs</span>
+            <strong>最近回测</strong>
+          </div>
+          {runs.length === 0 ? (
+            <EmptyState title="暂无回测记录" text="点击开始回测后，会把结果写入本地 SQLite。" />
+          ) : (
+            <div className="backtest-run-list">
+              {runs.map((run) => (
+                <button
+                  className={activeRun?.id === run.id ? "active" : ""}
+                  disabled={loadingRun}
+                  key={run.id}
+                  onClick={() => void openRun(run.id)}
+                >
+                  <strong>{run.name}</strong>
+                  <span>{runStatusLabel(run.status)} · {formatDateTime(run.created_at)}</span>
+                  {run.result?.summary && (
+                    <em className={numberTone(run.result.summary.total_pnl)}>
+                      {formatSignedNumber(run.result.summary.total_pnl)}U / {formatPercent(run.result.summary.total_return_pct)}
+                    </em>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </aside>
+      </div>
+
+      {error && <div className="inline-error backtest-error">{error}</div>}
+      {running && <EmptyState title="正在回测" text="逐个检查信号点，脚本指标会按日期缓存；区间过大时可能需要几十秒。" />}
+
+      {summaryStats && (
+        <>
+          <div className="backtest-summary-grid">
+            <BacktestStat label="总收益" value={`${formatSignedNumber(summaryStats.total_pnl)}U`} tone={numberTone(summaryStats.total_pnl)} />
+            <BacktestStat label="收益率" value={formatPercent(summaryStats.total_return_pct)} tone={numberTone(summaryStats.total_return_pct)} />
+            <BacktestStat label="交易数" value={`${summaryStats.total_trades}`} />
+            <BacktestStat label="胜率" value={formatPercent(summaryStats.win_rate)} />
+            <BacktestStat label="最大回撤" value={formatPercent(summaryStats.max_drawdown_pct)} tone={summaryStats.max_drawdown_pct < 0 ? "down" : ""} />
+            <BacktestStat label="信号命中" value={`${summaryStats.matched_signals}`} />
+          </div>
+
+          <div className="backtest-result-grid">
+            <div className="backtest-card">
+              <div className="backtest-card-head">
+                <span className="eyebrow">Equity</span>
+                <strong>资金曲线</strong>
+              </div>
+              <BacktestEquityChart points={result?.equity ?? []} />
+            </div>
+            <div className="backtest-card backtest-diagnostics">
+              <div className="backtest-card-head">
+                <span className="eyebrow">Diagnostics</span>
+                <strong>执行诊断</strong>
+              </div>
+              <div className="diagnostic-grid">
+                <span>检查点 <b>{summaryStats.checkpoints}</b></span>
+                <span>开仓 <b>{summaryStats.opened_trades}</b></span>
+                <span>重叠跳过 <b>{summaryStats.skipped_overlap}</b></span>
+                <span>满仓跳过 <b>{summaryStats.skipped_max_positions}</b></span>
+                <span>无入场K <b>{summaryStats.skipped_no_entry}</b></span>
+                <span>无出场K <b>{summaryStats.skipped_no_exit}</b></span>
+                <span>Profit Factor <b>{summaryStats.profit_factor ?? "--"}</b></span>
+                <span>耗时 <b>{summaryStats.duration_ms}ms</b></span>
+              </div>
+            </div>
+          </div>
+
+          <div className="backtest-card backtest-table-card">
+            <div className="backtest-card-head">
+              <span className="eyebrow">Trades</span>
+              <strong>交易明细</strong>
+              <em>展示前 {Math.min(trades.length, 200)} / {trades.length} 笔</em>
+            </div>
+            <div className="backtest-table-scroll">
+              <table className="backtest-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>合约</th>
+                    <th>信号时间</th>
+                    <th>入场</th>
+                    <th>出场</th>
+                    <th>入场价</th>
+                    <th>出场价</th>
+                    <th>收益</th>
+                    <th>盈亏U</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.slice(0, 200).map((trade) => (
+                    <tr key={`${activeRun?.id}-${trade.id}`}>
+                      <td>{trade.id}</td>
+                      <td>
+                        <span className="symbol-with-kline backtest-symbol-with-kline">
+                          <span>{trade.inst_id}</span>
+                          <button
+                            className="kline-icon-button"
+                            title="查看这笔交易的买卖点K线"
+                            onClick={() => void openTradeKline(trade, tradeKlinePeriod)}
+                          >
+                            K
+                          </button>
+                        </span>
+                      </td>
+                      <td>{trade.signal_time}</td>
+                      <td>{trade.entry_time}</td>
+                      <td>{trade.exit_time}</td>
+                      <td>{formatOptionalNumber(trade.entry_price)}</td>
+                      <td>{formatOptionalNumber(trade.exit_price)}</td>
+                      <td className={numberTone(trade.net_return_pct)}>{formatPercent(trade.net_return_pct)}</td>
+                      <td className={numberTone(trade.pnl_usdt)}>{formatSignedNumber(trade.pnl_usdt)}</td>
+                    </tr>
+                  ))}
+                  {trades.length === 0 && (
+                    <tr>
+                      <td colSpan={9}>本次回测没有产生可成交交易。</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {checkpoints.length > 0 && (
+            <div className="backtest-card checkpoint-strip">
+              <div className="backtest-card-head">
+                <span className="eyebrow">Signals</span>
+                <strong>最近信号检查点</strong>
+              </div>
+              <div>
+                {checkpoints.slice(-12).map((checkpoint) => (
+                  <span key={`${checkpoint.date}-${checkpoint.as_of_ts}`}>
+                    {checkpoint.signal_time} · 命中{checkpoint.matched_count} · 开仓{checkpoint.opened_count}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+      {klineTarget && (
+        <ContractKlineModal
+          target={klineTarget}
+          activePeriod={klinePeriod}
+          data={klineData}
+          loading={klineLoading}
+          error={klineError}
+          onPeriodChange={(period) => void changeTradeKlinePeriod(period)}
+          onClose={() => {
+            setKlineTarget(null);
+            setKlineData(null);
+            setKlineError(null);
+            setKlineMarkers([]);
+          }}
+          markers={klineMarkers}
+        />
+      )}
+    </section>
+  );
+}
+
+function BacktestStat({ label, value, tone = "" }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="backtest-stat">
+      <span>{label}</span>
+      <strong className={tone}>{value}</strong>
+    </div>
+  );
+}
+
+function BacktestEquityChart({ points }: { points: Array<{ time: string | null; equity: number; drawdown_pct: number }> }) {
+  if (points.length < 2) {
+    return <EmptyState title="暂无资金曲线" text="有平仓交易后才会形成资金曲线。" />;
+  }
+  const width = 760;
+  const height = 260;
+  const padding = { top: 22, right: 26, bottom: 36, left: 56 };
+  const equities = points.map((point) => point.equity);
+  const minEquity = Math.min(...equities);
+  const maxEquity = Math.max(...equities);
+  const span = maxEquity - minEquity || Math.max(1, maxEquity * 0.01);
+  const xFor = (index: number) => padding.left + (index / Math.max(1, points.length - 1)) * (width - padding.left - padding.right);
+  const yFor = (value: number) => padding.top + ((maxEquity - value) / span) * (height - padding.top - padding.bottom);
+  const polyline = points.map((point, index) => `${xFor(index)},${yFor(point.equity)}`).join(" ");
+  const latest = points.at(-1);
+
+  return (
+    <div className="backtest-equity-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="回测资金曲线">
+        <rect x="0" y="0" width={width} height={height} rx="14" />
+        {[minEquity, (minEquity + maxEquity) / 2, maxEquity].map((value) => {
+          const y = yFor(value);
+          return (
+            <g key={value}>
+              <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} />
+              <text x={padding.left - 10} y={y + 4}>{formatNumber(value)}</text>
+            </g>
+          );
+        })}
+        <polyline points={polyline} />
+        <circle cx={xFor(points.length - 1)} cy={yFor(latest?.equity ?? 0)} r="5" />
+        <text className="end" x={width - padding.right} y={height - 12}>{latest?.time ?? ""}</text>
+      </svg>
+      <div className="equity-chart-caption">
+        <span>最新权益 <b>{formatNumber(latest?.equity ?? 0)}U</b></span>
+        <span>当前回撤 <b>{formatPercent(latest?.drawdown_pct ?? 0)}</b></span>
+      </div>
     </div>
   );
 }
@@ -3243,6 +3844,82 @@ function defaultRunDate(summary: DataSummary | null, period: string) {
   return preferredQueryDate(timeframe) || localDateString();
 }
 
+function tradeKlineMarkers(trade: BacktestTrade): KlineTradeMarker[] {
+  return [
+    {
+      side: "buy",
+      ts: trade.entry_ts,
+      price: trade.entry_price,
+      label: "买",
+      time: trade.entry_time,
+    },
+    {
+      side: "sell",
+      ts: trade.exit_ts,
+      price: trade.exit_price,
+      label: "卖",
+      time: trade.exit_time,
+    },
+  ];
+}
+
+function defaultTradeKlinePeriod(trade: BacktestTrade, preferredPeriod: string) {
+  const durationMs = Math.max(0, trade.exit_ts - trade.entry_ts);
+  const candidates = [preferredPeriod, "1m", "5m", "1H", "1D"].filter(
+    (period, index, list) =>
+      list.indexOf(period) === index && klinePeriodOptions.some((option) => option.value === period),
+  );
+  return candidates.find((period) => Math.ceil(durationMs / klinePeriodMs(period)) + 10 <= 300) ?? "1D";
+}
+
+function tradeKlineWindowSize(
+  period: string,
+  anchorTs: number | null | undefined,
+  markers: KlineTradeMarker[],
+) {
+  const periodMs = klinePeriodMs(period);
+  const anchor = anchorTs ?? markers[0]?.ts ?? 0;
+  const markerTsValues = markers.map((marker) => marker.ts).filter((value) => Number.isFinite(value));
+  const minTs = Math.min(anchor, ...markerTsValues);
+  const maxTs = Math.max(anchor, ...markerTsValues);
+  return {
+    before: Math.min(300, Math.max(33, Math.ceil((anchor - minTs) / periodMs) + 10)),
+    after: Math.min(300, Math.max(33, Math.ceil((maxTs - anchor) / periodMs) + 10)),
+  };
+}
+
+function klinePeriodMs(period: string) {
+  const normalized = period.trim().toLowerCase();
+  const match = normalized.match(/^(\d+)(m|h|d)$/);
+  if (!match) return 60 * 1000;
+  const count = Number.parseInt(match[1], 10);
+  if (match[2] === "m") return count * 60 * 1000;
+  if (match[2] === "h") return count * 60 * 60 * 1000;
+  return count * 24 * 60 * 60 * 1000;
+}
+
+function suggestedBacktestRange(summary: DataSummary | null, period: string, mode: string) {
+  const timeframe = currentTimeframe(summary, period);
+  const end = timeframe ? preferredQueryDate(timeframe) || localDateString() : localDateString();
+  const rows = timeframe?.dates ?? [];
+  if (rows.length === 0) return { start: end, end };
+  const endIndex = rows.findIndex((item) => item.date === end);
+  const fallbackEndIndex = endIndex >= 0 ? endIndex : rows.length - 1;
+  const span = mode === "each_bar_close" ? 3 : 14;
+  const startIndex = Math.max(0, fallbackEndIndex - span + 1);
+  return {
+    start: rows[startIndex]?.date ?? end,
+    end: rows[fallbackEndIndex]?.date ?? end,
+  };
+}
+
+function runStatusLabel(status: string) {
+  if (status === "completed") return "完成";
+  if (status === "failed") return "失败";
+  if (status === "running") return "运行中";
+  return status;
+}
+
 function localDateString() {
   const now = new Date();
   const year = now.getFullYear();
@@ -3394,6 +4071,11 @@ function formatNumber(value: number) {
   return Intl.NumberFormat("zh-CN", { maximumFractionDigits: 8 }).format(value);
 }
 
+function formatSignedNumber(value: number) {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatNumber(value)}`;
+}
+
 function formatOptionalNumber(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "--";
   return formatNumber(value);
@@ -3408,6 +4090,32 @@ function hasKlineNumbers(row: ContractKlineRow): row is ContractKlineRow & {
   return [row.open, row.high, row.low, row.close].every(
     (value) => typeof value === "number" && Number.isFinite(value),
   );
+}
+
+function klineMarkerIndex(rows: ContractKlineRow[], markerTs: number) {
+  const timestamps = rows
+    .map((row, index) => ({ index, ts: row.ts }))
+    .filter((item): item is { index: number; ts: number } => typeof item.ts === "number" && Number.isFinite(item.ts));
+  if (timestamps.length === 0 || markerTs < timestamps[0].ts) return null;
+
+  const stepMs = estimatedKlineStepMs(timestamps.map((item) => item.ts));
+  const last = timestamps[timestamps.length - 1];
+  if (stepMs && markerTs > last.ts + stepMs - 1) return null;
+
+  let selected = timestamps[0].index;
+  for (const item of timestamps) {
+    if (item.ts > markerTs) break;
+    selected = item.index;
+  }
+  return selected;
+}
+
+function estimatedKlineStepMs(timestamps: number[]) {
+  for (let index = 1; index < timestamps.length; index += 1) {
+    const diff = timestamps[index] - timestamps[index - 1];
+    if (diff > 0) return diff;
+  }
+  return null;
 }
 
 function klineVolumeValue(row: ContractKlineRow) {

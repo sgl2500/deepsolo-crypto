@@ -30,6 +30,18 @@ class ScreenerFavoriteRepository:
             ).fetchall()
         return [self._row_to_item(row) for row in rows]
 
+    def get(self, favorite_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, name, timeframe, payload, created_at, updated_at
+                FROM screener_favorites
+                WHERE id = ?
+                """,
+                (favorite_id,),
+            ).fetchone()
+        return self._row_to_item(row) if row else None
+
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = str(payload.get("name") or "").strip()
         if not name:

@@ -389,6 +389,125 @@ export type ScreenerFavorite = ScreenerFavoritePayload & {
   condition_count: number;
 };
 
+export type BacktestRunRequest = {
+  favorite_id: string;
+  name?: string;
+  start_date: string;
+  end_date: string;
+  signal_timeframe: string;
+  signal_mode: "daily" | "each_bar_close";
+  entry_timeframe: string;
+  hold_hours: number;
+  position_usdt: number;
+  max_positions: number;
+  fee_bps_per_side: number;
+  slippage_bps_per_side: number;
+  checkpoint_limit?: number;
+};
+
+export type BacktestRunConfig = BacktestRunRequest & {
+  favorite_name?: string;
+};
+
+export type BacktestSummary = {
+  checkpoints: number;
+  matched_signals: number;
+  opened_trades: number;
+  skipped_overlap: number;
+  skipped_max_positions: number;
+  skipped_no_entry: number;
+  skipped_no_exit: number;
+  start_date: string;
+  end_date: string;
+  signal_mode: string;
+  signal_timeframe: string;
+  entry_timeframe: string;
+  hold_hours: number;
+  initial_capital: number;
+  total_trades: number;
+  win_trades: number;
+  loss_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  total_return_pct: number;
+  avg_pnl: number;
+  profit_factor: number | null;
+  max_drawdown_pct: number;
+  fee_bps_per_side: number;
+  slippage_bps_per_side: number;
+  duration_ms: number;
+};
+
+export type BacktestEquityPoint = {
+  ts: number | null;
+  time: string | null;
+  equity: number;
+  pnl_usdt: number;
+  drawdown_pct: number;
+};
+
+export type BacktestTrade = {
+  id: number;
+  inst_id: string;
+  signal_date: string;
+  signal_ts: number;
+  signal_time: string;
+  entry_ts: number;
+  entry_time: string;
+  exit_ts: number;
+  exit_time: string;
+  hold_hours: number;
+  position_usdt: number;
+  raw_entry_price: number;
+  raw_exit_price: number;
+  entry_price: number;
+  exit_price: number;
+  gross_return_pct: number;
+  net_return_pct: number;
+  fee_usdt: number;
+  pnl_usdt: number;
+  matched_conditions: string[];
+  signal_metrics: Record<string, number | string | null | undefined>;
+};
+
+export type BacktestCheckpoint = {
+  index: number;
+  date: string;
+  as_of_ts: number;
+  as_of_time: string;
+  signal_ts: number;
+  signal_time: string;
+  matched_count: number;
+  opened_count: number;
+  duration_ms: number;
+};
+
+export type BacktestResult = {
+  summary: BacktestSummary;
+  equity: BacktestEquityPoint[];
+  trades: BacktestTrade[];
+  checkpoints: BacktestCheckpoint[];
+  favorite?: {
+    id: string;
+    name: string;
+    timeframe: string;
+    condition_count: number;
+  };
+};
+
+export type BacktestRun = {
+  id: string;
+  name: string;
+  favorite_id: string;
+  status: "running" | "completed" | "failed" | string;
+  config: BacktestRunConfig;
+  result: BacktestResult | null;
+  error: string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+};
+
 export async function fetchSummary(force = false): Promise<DataSummary> {
   return request(`/api/data-source/summary?force=${force ? "true" : "false"}`);
 }
@@ -453,14 +572,14 @@ export async function fetchDataQualityContract(
 export async function fetchContractKlineWindow(params: {
   instId: string;
   timeframe: string;
-  date: string;
+  date?: string;
   anchorTs?: number | null;
   before?: number;
   after?: number;
 }): Promise<ContractKlineResponse> {
   const search = new URLSearchParams();
   search.set("timeframe", params.timeframe);
-  search.set("date", params.date);
+  if (params.date) search.set("date", params.date);
   search.set("before", `${params.before ?? 33}`);
   search.set("after", `${params.after ?? 33}`);
   if (params.anchorTs) search.set("anchor_ts", `${params.anchorTs}`);
@@ -606,6 +725,29 @@ export async function deleteScreenerFavorite(favoriteId: string): Promise<{ dele
   return request(`/api/screener/favorites/${encodeURIComponent(favoriteId)}`, {
     method: "DELETE",
   });
+}
+
+export async function fetchBacktestRuns(): Promise<{ items: BacktestRun[] }> {
+  return request("/api/backtests/runs");
+}
+
+export async function fetchBacktestRun(runId: string): Promise<BacktestRun> {
+  return request(`/api/backtests/runs/${encodeURIComponent(runId)}`);
+}
+
+export async function createBacktestRun(payload: BacktestRunRequest): Promise<BacktestRun> {
+  return request(
+    "/api/backtests/runs",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    {
+      timeoutMs: 120_000,
+      timeoutMessage: "回测请求超时：超过 120 秒还没有返回，请缩短日期区间或改成每日一次信号。",
+    },
+  );
 }
 
 export async function queryScreener(params: {

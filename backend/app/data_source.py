@@ -4,7 +4,7 @@ import csv
 import gzip
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -105,7 +105,7 @@ class DataSourceService:
         self,
         *,
         timeframe: str,
-        date: str,
+        date: str | None,
         inst_id: str,
         anchor_ts: int | None = None,
         before: int = 33,
@@ -115,10 +115,22 @@ class DataSourceService:
         before = max(1, min(before, 300))
         after = max(0, min(after, 300))
         dates = [item.date for item in self._date_partitions(self._timeframe_dir(normalized_timeframe))]
-        if date not in dates:
-            raise ValueError(f"没有找到基准日期分区：{date}")
+        if not date or date not in dates:
+            date = self._resolve_anchor_date(
+                normalized_timeframe,
+                dates,
+                inst_id,
+                anchor_ts,
+            )
+        if not date:
+            raise ValueError("没有找到基准日期分区")
 
         base_path = self._contract_path(normalized_timeframe, date, inst_id)
+        if not base_path.exists():
+            resolved_date = self._resolve_anchor_date(normalized_timeframe, dates, inst_id, anchor_ts)
+            if resolved_date and resolved_date != date:
+                date = resolved_date
+                base_path = self._contract_path(normalized_timeframe, date, inst_id)
         if not base_path.exists():
             raise ValueError(f"基准日期没有找到合约 K 线：{inst_id}")
 
@@ -336,6 +348,38 @@ class DataSourceService:
 
     def _contract_path(self, timeframe: str, date: str, inst_id: str) -> Path:
         return self._timeframe_dir(timeframe) / f"date={date}" / f"{inst_id}.csv.gz"
+
+    def _resolve_anchor_date(
+        self,
+        timeframe: str,
+        dates: list[str],
+        inst_id: str,
+        anchor_ts: int | None,
+    ) -> str | None:
+        if anchor_ts is None:
+            return dates[-1] if dates else None
+
+        date_set = set(dates)
+        for candidate in self._anchor_date_candidates(timeframe, anchor_ts):
+            if candidate in date_set and self._contract_path(timeframe, candidate, inst_id).exists():
+                return candidate
+        return None
+
+    def _anchor_date_candidates(self, timeframe: str, anchor_ts: int) -> list[str]:
+        local_dt = datetime.fromtimestamp(anchor_ts / 1000, tz=ZoneInfo(APP_TIMEZONE))
+        utc_dt = datetime.fromtimestamp(anchor_ts / 1000, tz=timezone.utc)
+        seeds = [local_dt.date()]
+        if timeframe != "1D":
+            # Intraday folders follow UTC date partitions, which are CST 08:00~next 07:59.
+            seeds.insert(0, utc_dt.date())
+
+        candidates: list[str] = []
+        for seed in seeds:
+            for offset in (0, -1, 1, -2, 2):
+                item = (seed + timedelta(days=offset)).isoformat()
+                if item not in candidates:
+                    candidates.append(item)
+        return candidates
 
     def _read_contract_rows_for_dates(
         self,
