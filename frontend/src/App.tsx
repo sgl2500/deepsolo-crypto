@@ -71,6 +71,7 @@ const metadataOperatorOptions = [
   { value: "ne", label: "不等于" },
   { value: "contains", label: "包含" },
 ];
+const defaultMetadataOperator = "any_not_empty";
 
 type MetadataConditionDraft = {
   indicatorId: string;
@@ -1081,7 +1082,9 @@ function MetadataConditionModal({
     setDraft((current) => ({
       ...current,
       indicatorId: item.id,
-      operator: nextOptions.some((option) => option.value === current.operator) ? current.operator : nextOptions[0].value,
+      operator: nextOptions.some((option) => option.value === current.operator)
+        ? current.operator
+        : defaultMetadataOperator,
       timePoint: normalizeDraftTimePointForPeriod(item.storage_period, current.timePoint),
     }));
     setMetadataSearch("");
@@ -2930,7 +2933,7 @@ function defaultMetadataConditionDraft(): MetadataConditionDraft {
     timeMode: "previous_trading_day",
     timeOffset: "1",
     timePoint: "",
-    operator: "gt",
+    operator: defaultMetadataOperator,
     value: "",
     truncateMode: "none",
     truncateCount: "",
