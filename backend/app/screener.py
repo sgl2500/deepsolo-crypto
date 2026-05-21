@@ -14,6 +14,7 @@ from bisect import bisect_left
 from .config import APP_TIMEZONE
 from .data_source import data_source_service
 from .indicator_repository import indicator_repository
+from . import script_indicator_service
 
 
 @dataclass
@@ -48,6 +49,7 @@ def query_screener(
     files = data_source_service.contract_files(timeframe, selected_date)
     metadata_filter_specs = _prepare_metadata_filter_specs(metadata_filters or [], selected_date)
     metadata_period_files = _metadata_period_files(metadata_filter_specs)
+    metadata_script_values = _metadata_script_values(metadata_filter_specs)
     rows: list[dict[str, Any]] = []
     condition_stats = {
         "min_ret_15m": 0,
@@ -82,6 +84,7 @@ def query_screener(
             condition_stats,
             metadata_filter_specs,
             metadata_period_files,
+            metadata_script_values,
             as_of_ts,
         )
         if not metadata_matched:
@@ -277,6 +280,7 @@ def _match_metadata_filters(
     condition_stats: dict[str, int],
     filters: list[dict[str, Any]],
     period_files: dict[tuple[str, str], dict[str, Path]],
+    script_values: dict[tuple[str, str], dict[str, list[dict[str, str]]]],
     as_of_ts: int | None,
 ) -> tuple[bool, list[str], dict[str, str]]:
     if not filters:
@@ -295,48 +299,94 @@ def _match_metadata_filters(
             all_passed = False
             continue
 
-        raw_field = indicator.get("raw_field")
-        if not raw_field:
-            all_passed = False
-            continue
-
-        source_row = raw_row
         indicator_period = str(indicator.get("storage_period") or base_timeframe)
         target_date = str(condition.get("_target_date") or "")
-        if indicator_period.lower() != base_timeframe.lower() or target_date:
-            source_key = (indicator_period, target_date)
-            source_path = period_files.get(source_key, {}).get(file_name)
-            if source_path is None:
-                all_passed = False
-                continue
-            condition_as_of_ts = _condition_as_of_ts(condition, target_date, indicator_period, as_of_ts)
-            source_row = _latest_raw_row(source_path, condition_as_of_ts)
+        condition_as_of_ts = _condition_as_of_ts(condition, target_date, indicator_period, as_of_ts)
+        operator = str(condition.get("operator") or "gt")
+        expected = str(condition.get("value") or "")
+        value_mode = _value_mode(operator)
+        raw_value: str | None = None
+
+        if indicator.get("source_type") == "script":
+            inst_id = file_name.removesuffix(".csv.gz")
+            source_row = _latest_script_row(
+                script_values.get((indicator_id, target_date), {}),
+                inst_id,
+                condition_as_of_ts,
+            )
             if source_row is None:
-                all_passed = False
+                if value_mode == "any":
+                    pass
+                elif value_mode == "empty":
+                    condition_stats[stat_key] += 1
+                    reasons.append(_metadata_reason(indicator, operator, expected, False))
+                    continue
+                else:
+                    all_passed = False
+                continue
+            raw_value = source_row.get("value", "") or ""
+        else:
+            raw_field = indicator.get("raw_field")
+            if not raw_field:
+                if value_mode == "empty":
+                    condition_stats[stat_key] += 1
+                    reasons.append(_metadata_reason(indicator, operator, expected, False))
+                    continue
+                if value_mode != "any":
+                    all_passed = False
                 continue
 
-        raw_value = source_row.get(raw_field, "")
+            source_row = raw_row
+            if indicator_period.lower() != base_timeframe.lower() or target_date:
+                source_key = (indicator_period, target_date)
+                source_path = period_files.get(source_key, {}).get(file_name)
+                if source_path is None:
+                    if value_mode == "empty":
+                        condition_stats[stat_key] += 1
+                        reasons.append(_metadata_reason(indicator, operator, expected, False))
+                        continue
+                    if value_mode != "any":
+                        all_passed = False
+                    continue
+                source_row = _latest_raw_row(source_path, condition_as_of_ts)
+                if source_row is None:
+                    if value_mode == "empty":
+                        condition_stats[stat_key] += 1
+                        reasons.append(_metadata_reason(indicator, operator, expected, False))
+                        continue
+                    if value_mode != "any":
+                        all_passed = False
+                    continue
+            raw_value = source_row.get(raw_field, "") or ""
+
         value_key = _metadata_value_key(indicator_id, target_date, str(condition.get("time_point") or ""))
         values[value_key] = raw_value
         values[indicator_id] = raw_value
-        operator = str(condition.get("operator") or "gt")
-        expected = str(condition.get("value") or "")
-        passed = _compare_metadata_value(
-            raw_value,
-            expected,
-            operator,
-            str(indicator.get("data_type") or "string"),
-        )
+        if value_mode == "any":
+            passed = True
+        elif value_mode == "empty":
+            passed = raw_value.strip() == ""
+        elif value_mode == "not_empty":
+            passed = raw_value.strip() != ""
+        else:
+            passed = _compare_metadata_value(
+                raw_value,
+                expected,
+                operator,
+                str(indicator.get("data_type") or "string"),
+            )
 
-        if condition.get("exclude"):
+        if condition.get("exclude") and value_mode == "filter":
             passed = not passed
 
         if not passed:
             all_passed = False
             continue
 
-        condition_stats[stat_key] += 1
-        reasons.append(_metadata_reason(indicator, operator, expected, bool(condition.get("exclude"))))
+        if value_mode in ("empty", "not_empty") or raw_value not in (None, ""):
+            condition_stats[stat_key] += 1
+        if value_mode != "any":
+            reasons.append(_metadata_reason(indicator, operator, expected, bool(condition.get("exclude"))))
 
     if not all_passed:
         return False, [], {}
@@ -360,12 +410,69 @@ def _metadata_period_files(filters: list[dict[str, Any]]) -> dict[tuple[str, str
     period_dates = {
         (str(indicator.get("storage_period")), str(condition.get("_target_date")))
         for condition in filters
-        if (indicator := condition.get("_indicator")) and indicator.get("storage_period") and condition.get("_target_date")
+        if (indicator := condition.get("_indicator"))
+        and indicator.get("source_type") != "script"
+        and indicator.get("storage_period")
+        and condition.get("_target_date")
     }
     return {
         (period, date): {path.name: path for path in data_source_service.contract_files(period, date)}
         for period, date in period_dates
     }
+
+
+def _metadata_script_values(filters: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, list[dict[str, str]]]]:
+    outputs: dict[tuple[str, str], dict[str, list[dict[str, str]]]] = {}
+    script_conditions = [
+        condition
+        for condition in filters
+        if (indicator := condition.get("_indicator")) and indicator.get("source_type") == "script"
+    ]
+    for condition in script_conditions:
+        indicator = condition["_indicator"]
+        indicator_id = str(indicator.get("id"))
+        target_date = str(condition.get("_target_date") or "")
+        key = (indicator_id, target_date)
+        if key in outputs:
+            continue
+
+        result = script_indicator_service.trial_run(
+            indicator_id,
+            date=target_date,
+            input_timeframe=str(indicator.get("storage_period") or "1m"),
+            limit=1000,
+        )
+        if not result.get("success"):
+            detail = result.get("stderr") or "脚本执行失败，无法参与组合查询"
+            raise ValueError(f"{indicator.get('name_zh') or indicator_id}：{detail}")
+        outputs[key] = _group_script_rows(result.get("rows", []))
+    return outputs
+
+
+def _group_script_rows(rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        inst_id = str(row.get("inst_id") or "")
+        if not inst_id:
+            continue
+        grouped.setdefault(inst_id, []).append(row)
+    for values in grouped.values():
+        values.sort(key=lambda item: _to_int(item.get("ts")) or -1)
+    return grouped
+
+
+def _latest_script_row(
+    rows_by_inst: dict[str, list[dict[str, str]]],
+    inst_id: str,
+    as_of_ts: int | None,
+) -> dict[str, str] | None:
+    selected: dict[str, str] | None = None
+    for row in rows_by_inst.get(inst_id, []):
+        ts = _to_int(row.get("ts"))
+        if as_of_ts is not None and ts is not None and ts > as_of_ts:
+            break
+        selected = row
+    return selected
 
 
 def _condition_target_date(condition: dict[str, Any], period: str, selected_date: str) -> str:
@@ -473,7 +580,21 @@ def _latest_raw_row(path: Path, as_of_ts: int | None) -> dict[str, str] | None:
     return selected
 
 
+def _value_mode(operator: str) -> str:
+    normalized = operator.strip().lower()
+    if normalized in ("any", "*", "任意"):
+        return "any"
+    if normalized in ("any_empty", "empty", "is_empty", "blank", "任意为空", "为空"):
+        return "empty"
+    if normalized in ("any_not_empty", "not_empty", "is_not_empty", "not_blank", "任意不为空", "不为空"):
+        return "not_empty"
+    return "filter"
+
+
 def _compare_metadata_value(raw_value: str, expected: str, operator: str, data_type: str) -> bool:
+    if _value_mode(operator) == "any":
+        return True
+
     if data_type == "number":
         current_number = _to_float(raw_value)
         expected_number = _to_float(expected)
@@ -513,6 +634,9 @@ def _compare_ordered(current: float, expected: float, operator: str) -> bool:
 
 def _metadata_reason(indicator: dict[str, Any], operator: str, expected: str, excluded: bool) -> str:
     labels = {
+        "any": "任意",
+        "any_empty": "为空",
+        "any_not_empty": "不为空",
         "gt": ">",
         "gte": ">=",
         "lt": "<",

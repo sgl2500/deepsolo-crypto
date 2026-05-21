@@ -24,6 +24,14 @@ PREFERRED_BACKEND_PORT="${BACKEND_PORT:-49171}"
 
 mkdir -p "$RUNTIME_DIR"
 
+SECRETS_FILE="$RUNTIME_DIR/secrets.env"
+if [ -f "$SECRETS_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$SECRETS_FILE"
+  set +a
+fi
+
 is_port_free() {
   python3 - "$1" <<'PY'
 import socket
@@ -95,11 +103,15 @@ APP_TIMEZONE=$APP_TIMEZONE
 BACKEND_PORT=$BACKEND_PORT
 FRONTEND_PORT=$FRONTEND_PORT
 VITE_API_BASE_URL=http://127.0.0.1:$BACKEND_PORT
+OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.4-mini}
+OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com}
 EOF
 
 export CRYPTO_DATA_ROOT="$DATA_ROOT"
 export APP_TIMEZONE="$APP_TIMEZONE"
 export VITE_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT"
+export OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.4-mini}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com}"
 
 stop_tree() {
   pid="$1"

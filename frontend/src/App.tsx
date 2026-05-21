@@ -3,23 +3,42 @@ import ConfigProvider from "antd/es/config-provider";
 import Table from "antd/es/table";
 import type { ColumnsType } from "antd/es/table";
 import {
+  ContractListResponse,
+  ContractKlineResponse,
+  ContractKlineRow,
+  ContractUpdateStatus,
   DataSummary,
   Indicator,
   IndicatorCatalogResponse,
+  ScreenerFavorite,
+  ScreenerFavoriteCondition,
+  ScriptTrialRunResponse,
+  ScriptWorkspaceResponse,
   ScreenerMetadataFilterPayload,
   ScreenerResponse,
   ScreenerRow,
+  createScreenerFavorite,
   TimeframeSummary,
   createIndicator,
   deleteIndicator,
+  deleteScreenerFavorite,
+  fetchActiveContracts,
+  fetchContractKlineWindow,
+  fetchContractUpdateStatus,
   fetchIndicatorValuePreview,
   fetchIndicators,
+  fetchScreenerFavorites,
+  fetchScriptWorkspace,
   fetchSummary,
+  generateScriptWithAi,
   queryScreener,
+  saveScriptIndicatorScript,
+  startContractUpdateDeploy,
+  trialRunScriptIndicator,
   updateIndicator,
 } from "./api";
 
-const navItems = ["选币查询", "指标生产", "指标仓库", "数据源管理", "运行日志"];
+const navItems = ["选币查询", "合约列表", "指标生产", "指标仓库"];
 const timeframeLabels: Record<string, string> = {
   "1m": "1分钟",
   "5m": "5分钟",
@@ -27,8 +46,17 @@ const timeframeLabels: Record<string, string> = {
   "1H": "1小时",
   "1D": "日线",
 };
+const klinePeriodOptions = [
+  { value: "1D", label: "日" },
+  { value: "1H", label: "1小时" },
+  { value: "5m", label: "5分钟" },
+  { value: "1m", label: "1分钟" },
+];
 
 const metadataOperatorOptions = [
+  { value: "any", label: "任意" },
+  { value: "any_empty", label: "任意为空" },
+  { value: "any_not_empty", label: "任意不为空" },
   { value: "gt", label: "大于" },
   { value: "gte", label: "大于等于" },
   { value: "lt", label: "小于" },
@@ -72,6 +100,17 @@ export default function App() {
   const [sortBy, setSortBy] = useState("ret_15m");
   const [result, setResult] = useState<ScreenerResponse | null>(null);
   const [activePage, setActivePage] = useState("选币查询");
+  const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const [favoriteLoading, setFavoriteLoading] = useState(false);
+  const [favoriteSaving, setFavoriteSaving] = useState(false);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  const [favoriteNotice, setFavoriteNotice] = useState<string | null>(null);
+  const [klineTarget, setKlineTarget] = useState<{ instId: string; anchorTs?: number | null } | null>(null);
+  const [klinePeriod, setKlinePeriod] = useState("1D");
+  const [klineData, setKlineData] = useState<ContractKlineResponse | null>(null);
+  const [klineLoading, setKlineLoading] = useState(false);
+  const [klineError, setKlineError] = useState<string | null>(null);
   const [metadataConditions, setMetadataConditions] = useState<MetadataCondition[]>([]);
   const [conditionModalOpen, setConditionModalOpen] = useState(false);
   const [editingCondition, setEditingCondition] = useState<MetadataCondition | null>(null);
@@ -84,14 +123,18 @@ export default function App() {
 
   useEffect(() => {
     void loadSummary();
+    void loadFavorites();
   }, []);
 
   useEffect(() => {
     const current = currentTimeframe(summary, timeframe);
     if (current) {
-      setDate(preferredQueryDate(current));
+      const currentDateStillAvailable = current.dates.some((item) => item.date === date);
+      if (!currentDateStillAvailable) {
+        setDate(preferredQueryDate(current));
+      }
     }
-  }, [summary, timeframe]);
+  }, [summary, timeframe, date]);
 
   useEffect(() => {
     if (date && metadataConditions.length > 0) {
@@ -135,7 +178,21 @@ export default function App() {
         fixed: "left",
         width: 250,
         align: "center",
-        render: (value: string) => <span className="pro-symbol-cell">{value}</span>,
+        render: (value: string, row: ScreenerTableRow) => (
+          <span className="symbol-with-kline">
+            <span className="pro-symbol-cell">{value}</span>
+            <button
+              className="kline-icon-button"
+              title="查看基准日前后各33根K线"
+              onClick={(event) => {
+                event.stopPropagation();
+                void openKlineWindow(row);
+              }}
+            >
+              K
+            </button>
+          </span>
+        ),
       },
       ...valueConditions.map((condition) => {
         const columnValueKey = valueConditionKey(condition, date, dates);
@@ -156,7 +213,7 @@ export default function App() {
         };
       }),
     ],
-    [date, dates, valueConditions],
+    [date, dates, valueConditions, timeframe],
   );
   const selectedDateIndex = dates.findIndex((item) => item.date === date);
   const previousDate = selectedDateIndex >= 0 ? dates[selectedDateIndex + 1] : undefined;
@@ -177,6 +234,119 @@ export default function App() {
       setError(err instanceof Error ? err.message : "数据源扫描失败");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadFavorites() {
+    setFavoriteLoading(true);
+    setFavoriteError(null);
+    try {
+      const data = await fetchScreenerFavorites();
+      setFavorites(data.items);
+    } catch (err) {
+      setFavoriteError(err instanceof Error ? err.message : "收藏列表加载失败");
+    } finally {
+      setFavoriteLoading(false);
+    }
+  }
+
+  async function saveCurrentFavorite() {
+    if (metadataConditions.length === 0) {
+      setFavoriteError("请先添加筛选条件，再收藏这组条件。");
+      setFavoriteNotice(null);
+      setFavoritesOpen(true);
+      return;
+    }
+
+    setFavoriteSaving(true);
+    setFavoriteError(null);
+    setFavoriteNotice(null);
+    try {
+      const favorite = await createScreenerFavorite({
+        name: favoriteName(metadataConditions, date),
+        timeframe,
+        date: date || null,
+        as_of_time: asOfTime,
+        min_ret_15m: minRet15m,
+        min_vol_ratio_60: minVolRatio60,
+        min_vol_quote_15m: minVolQuote15m,
+        sort_by: sortBy,
+        metadata_conditions: metadataConditions.map(toFavoriteCondition),
+      });
+      setFavorites((current) => [favorite, ...current.filter((item) => item.id !== favorite.id)]);
+      setFavoriteNotice(`已收藏：${favorite.name}`);
+      setFavoritesOpen(true);
+    } catch (err) {
+      setFavoriteError(err instanceof Error ? err.message : "收藏条件保存失败");
+    } finally {
+      setFavoriteSaving(false);
+    }
+  }
+
+  function applyFavorite(favorite: ScreenerFavorite) {
+    const restoredConditions = favorite.metadata_conditions
+      .map(fromFavoriteCondition)
+      .filter((condition): condition is MetadataCondition => Boolean(condition));
+    setTimeframe(favorite.timeframe || timeframe);
+    if (favorite.date) setDate(favorite.date);
+    setAsOfTime(favorite.as_of_time ?? "");
+    setMinRet15m(favorite.min_ret_15m ?? "");
+    setMinVolRatio60(favorite.min_vol_ratio_60 ?? "");
+    setMinVolQuote15m(favorite.min_vol_quote_15m ?? "");
+    setSortBy(favorite.sort_by ?? "ret_15m");
+    setMetadataConditions(restoredConditions);
+    setFavoriteNotice(null);
+    setFavoriteError(null);
+    setFavoritesOpen(false);
+  }
+
+  async function removeFavorite(favoriteId: string) {
+    setFavoriteError(null);
+    try {
+      await deleteScreenerFavorite(favoriteId);
+      setFavorites((current) => current.filter((item) => item.id !== favoriteId));
+    } catch (err) {
+      setFavoriteError(err instanceof Error ? err.message : "删除收藏失败");
+    }
+  }
+
+  async function openKlineWindow(row: ScreenerTableRow) {
+    if (!date) {
+      setKlineError("请先选择基准日期。");
+      return;
+    }
+    const target = { instId: row.inst_id, anchorTs: row.latest_ts };
+    const period = "1D";
+    setKlineTarget(target);
+    setKlinePeriod(period);
+    await loadKlineWindow(target, period);
+  }
+
+  async function changeKlinePeriod(period: string) {
+    if (!klineTarget) return;
+    setKlinePeriod(period);
+    await loadKlineWindow(klineTarget, period);
+  }
+
+  async function loadKlineWindow(target: { instId: string; anchorTs?: number | null }, period: string) {
+    if (!date) return;
+    setKlineData(null);
+    setKlineLoading(true);
+    setKlineError(null);
+    try {
+      const data = await fetchContractKlineWindow({
+        instId: target.instId,
+        timeframe: period,
+        date,
+        anchorTs: target.anchorTs,
+        before: 33,
+        after: 33,
+      });
+      setKlineData(data);
+    } catch (err) {
+      setKlineError(err instanceof Error ? err.message : "K线数据加载失败");
+    } finally {
+      setKlineLoading(false);
     }
   }
 
@@ -239,22 +409,46 @@ export default function App() {
       <main className="workspace">
         {activePage === "指标仓库" ? (
           <IndicatorWarehousePage summary={summary} />
+        ) : activePage === "合约列表" ? (
+          <ContractListPage summary={summary} onSummaryRefresh={() => loadSummary(true)} />
         ) : activePage === "指标生产" ? (
           <IndicatorProductionPage summary={summary} />
         ) : (
           <>
             <section className="screener-terminal focused-screener">
               <div className="terminal-action-row minimal-actions">
-                <button className="filter-only-button" onClick={() => {
-                  setEditingCondition(null);
-                  setConditionModalOpen(true);
-                }}>
-                  +筛选条件
-                </button>
-                <button className="page-refresh-button" onClick={() => { void loadSummary(true); void runQuery(); }}>
-                  ↻ 页面刷新
-                </button>
+                <div className="screener-action-group">
+                  <button className="filter-only-button" onClick={() => {
+                    setEditingCondition(null);
+                    setConditionModalOpen(true);
+                  }}>
+                    +筛选条件
+                  </button>
+                  <button
+                    className="favorite-save-button"
+                    disabled={favoriteSaving || metadataConditions.length === 0}
+                    onClick={() => void saveCurrentFavorite()}
+                  >
+                    {favoriteSaving ? "收藏中..." : "☆ 收藏条件"}
+                  </button>
+                </div>
+                <div className="screener-action-group right">
+                  <button className="favorite-open-button" onClick={() => {
+                    setFavoritesOpen(true);
+                    void loadFavorites();
+                  }}>
+                    收藏夹 <b>{favorites.length}</b>
+                  </button>
+                  <button className="page-refresh-button" onClick={() => { void loadSummary(true); void runQuery(); }}>
+                    ↻ 页面刷新
+                  </button>
+                </div>
               </div>
+              {(favoriteNotice || favoriteError) && (
+                <div className={favoriteError ? "favorite-message error" : "favorite-message"}>
+                  {favoriteError || favoriteNotice}
+                </div>
+              )}
 
               <div className="terminal-condition-grid focused-conditions">
                 {metadataConditions.length === 0 ? (
@@ -388,6 +582,32 @@ export default function App() {
                 }}
               />
             )}
+            {favoritesOpen && (
+              <ScreenerFavoritesModal
+                favorites={favorites}
+                loading={favoriteLoading}
+                error={favoriteError}
+                onClose={() => setFavoritesOpen(false)}
+                onRefresh={() => void loadFavorites()}
+                onApply={applyFavorite}
+                onDelete={(favoriteId) => void removeFavorite(favoriteId)}
+              />
+            )}
+            {klineTarget && (
+              <ContractKlineModal
+                target={klineTarget}
+                activePeriod={klinePeriod}
+                data={klineData}
+                loading={klineLoading}
+                error={klineError}
+                onPeriodChange={(period) => void changeKlinePeriod(period)}
+                onClose={() => {
+                  setKlineTarget(null);
+                  setKlineData(null);
+                  setKlineError(null);
+                }}
+              />
+            )}
           </>
         )}
       </main>
@@ -466,6 +686,307 @@ function FilterValueCell({
   );
 }
 
+function ScreenerFavoritesModal({
+  favorites,
+  loading,
+  error,
+  onClose,
+  onRefresh,
+  onApply,
+  onDelete,
+}: {
+  favorites: ScreenerFavorite[];
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onRefresh: () => void;
+  onApply: (favorite: ScreenerFavorite) => void;
+  onDelete: (favoriteId: string) => void;
+}) {
+  return (
+    <div className="modal-backdrop favorite-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="favorite-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head favorite-modal-head">
+          <div>
+            <span className="eyebrow">SQLite 收藏夹</span>
+            <h2>收藏的选币条件</h2>
+          </div>
+          <div className="favorite-head-actions">
+            <button className="secondary-action" onClick={onRefresh}>刷新</button>
+            <button className="close-button" onClick={onClose}>×</button>
+          </div>
+        </div>
+
+        {error && <div className="inline-error favorite-modal-error">{error}</div>}
+
+        <div className="favorite-list">
+          {loading ? (
+            <EmptyState title="正在读取收藏" text="从后端 SQLite 数据库加载选币条件。" />
+          ) : favorites.length === 0 ? (
+            <EmptyState title="还没有收藏" text="组合好筛选条件后，点击「收藏条件」保存到 SQLite。" />
+          ) : (
+            favorites.map((favorite) => (
+              <article className="favorite-card" key={favorite.id}>
+                <button className="favorite-apply-area" onClick={() => onApply(favorite)}>
+                  <div className="favorite-card-top">
+                    <strong>{favorite.name}</strong>
+                    <span>{timeframeLabels[favorite.timeframe] ?? favorite.timeframe}</span>
+                  </div>
+                  <div className="favorite-card-meta">
+                    <span>{favorite.condition_count} 个条件</span>
+                    <span>{favorite.date ? `基准 ${formatDateBadge(favorite.date)}` : "不固定日期"}</span>
+                    <span>更新 {formatDateTime(favorite.updated_at)}</span>
+                  </div>
+                  <div className="favorite-condition-preview">
+                    {favorite.metadata_conditions.slice(0, 3).map((condition, index) => (
+                      <em key={`${favorite.id}-${condition.indicator_id}-${index}`}>
+                        {favoriteConditionText(condition)}
+                      </em>
+                    ))}
+                    {favorite.metadata_conditions.length > 3 && <em>还有 {favorite.metadata_conditions.length - 3} 个条件...</em>}
+                  </div>
+                </button>
+                <button className="favorite-delete-button" onClick={() => onDelete(favorite.id)}>
+                  删除
+                </button>
+              </article>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContractKlineModal({
+  target,
+  activePeriod,
+  data,
+  loading,
+  error,
+  onPeriodChange,
+  onClose,
+}: {
+  target: { instId: string; anchorTs?: number | null };
+  activePeriod: string;
+  data: ContractKlineResponse | null;
+  loading: boolean;
+  error: string | null;
+  onPeriodChange: (period: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop kline-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="kline-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head kline-modal-head">
+          <div>
+            <span className="eyebrow">K线窗口</span>
+            <h2>{target.instId}</h2>
+          </div>
+          <div className="kline-head-actions">
+            <div className="kline-period-tabs" role="tablist" aria-label="K线周期">
+              {klinePeriodOptions.map((option) => (
+                <button
+                  className={option.value === activePeriod ? "active" : ""}
+                  disabled={loading}
+                  key={option.value}
+                  onClick={() => onPeriodChange(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <button className="close-button" onClick={onClose}>×</button>
+          </div>
+        </div>
+
+        {loading ? (
+          <EmptyState title="正在读取K线" text="默认获取基准日前后各 33 根 K 线。" />
+        ) : error ? (
+          <EmptyState title="K线加载失败" text={error} />
+        ) : data ? (
+          <>
+            <div className="kline-summary-strip">
+              <div>
+                <span>周期</span>
+                <strong>{klinePeriodLabel(data.timeframe)}</strong>
+              </div>
+              <div>
+                <span>基准日期</span>
+                <strong>{formatDateBadge(data.date)}</strong>
+              </div>
+              <div>
+                <span>基准K线</span>
+                <strong>{data.anchor_time ?? "--"}</strong>
+              </div>
+              <div>
+                <span>已返回</span>
+                <strong>{data.returned_count} 根</strong>
+              </div>
+              <div>
+                <span>前/后</span>
+                <strong>{data.before_count}/{data.after_count}</strong>
+              </div>
+            </div>
+            <KlineChart rows={data.rows} anchorIndex={data.anchor_index} />
+          </>
+        ) : (
+          <EmptyState title="等待K线数据" text="点击合约旁的 K 图标加载前后 33 根 K 线。" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KlineChart({ rows, anchorIndex }: { rows: ContractKlineRow[]; anchorIndex: number }) {
+  const [activeIndex, setActiveIndex] = useState(anchorIndex);
+  const [lockedIndex, setLockedIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    setActiveIndex(anchorIndex);
+    setLockedIndex(null);
+  }, [anchorIndex, rows]);
+
+  const candles = rows.filter(hasKlineNumbers);
+  if (candles.length === 0) {
+    return <EmptyState title="暂无可绘制K线" text="当前返回数据缺少开高低收价格。" />;
+  }
+
+  const width = 980;
+  const height = 430;
+  const padding = { top: 22, right: 54, bottom: 38, left: 54 };
+  const volumeHeight = 74;
+  const volumeGap = 18;
+  const plotWidth = width - padding.left - padding.right;
+  const pricePlotHeight = height - padding.top - padding.bottom - volumeHeight - volumeGap;
+  const volumeTop = padding.top + pricePlotHeight + volumeGap;
+  const maxHigh = Math.max(...candles.map((row) => row.high));
+  const minLow = Math.min(...candles.map((row) => row.low));
+  const span = maxHigh - minLow || Math.max(1, maxHigh * 0.01);
+  const yFor = (value: number) => padding.top + ((maxHigh - value) / span) * pricePlotHeight;
+  const step = plotWidth / Math.max(1, rows.length - 1);
+  const candleWidth = Math.max(4, Math.min(12, step * 0.56));
+  const gridValues = [0, 0.25, 0.5, 0.75, 1].map((ratio) => maxHigh - span * ratio);
+  const maxVolume = Math.max(...rows.map(klineVolumeValue), 0);
+  const volumeBarWidth = Math.max(3, Math.min(12, step * 0.62));
+  const volumeYFor = (value: number) =>
+    volumeTop + volumeHeight - (maxVolume > 0 ? (value / maxVolume) * volumeHeight : 0);
+  const activeRow = rows[activeIndex] && hasKlineNumbers(rows[activeIndex]) ? rows[activeIndex] : null;
+  const activeChange = activeRow && activeRow.open !== 0 ? ((activeRow.close - activeRow.open) / activeRow.open) * 100 : null;
+
+  return (
+    <div
+      className="kline-chart-shell"
+      onMouseLeave={() => setActiveIndex(lockedIndex ?? anchorIndex)}
+    >
+      {activeRow && (
+        <div className={lockedIndex === activeIndex ? "kline-hover-card locked" : "kline-hover-card"}>
+          <div className="kline-hover-head">
+            <strong>{activeRow.time ?? "--"}</strong>
+            <span>{lockedIndex === activeIndex ? "已固定" : "悬浮查看 · 点击固定"}</span>
+          </div>
+          <div className="kline-hover-grid">
+            <span>开 <b>{formatOptionalNumber(activeRow.open)}</b></span>
+            <span>高 <b>{formatOptionalNumber(activeRow.high)}</b></span>
+            <span>低 <b>{formatOptionalNumber(activeRow.low)}</b></span>
+            <span>收 <b>{formatOptionalNumber(activeRow.close)}</b></span>
+            <span>涨跌 <b className={activeChange !== null ? numberTone(activeChange) : ""}>{formatKlineChangePercent(activeChange)}</b></span>
+            <span>量 <b>{formatCompact(klineVolumeValue(activeRow))}</b></span>
+          </div>
+          <em>第 {activeIndex + 1}/{rows.length} 根</em>
+        </div>
+      )}
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="K线图">
+        <rect x="0" y="0" width={width} height={height} rx="14" />
+        {gridValues.map((value) => {
+          const y = yFor(value);
+          return (
+            <g key={value}>
+              <line className="kline-grid" x1={padding.left} x2={width - padding.right} y1={y} y2={y} />
+              <text className="kline-axis-text" x={width - padding.right + 10} y={y + 4}>
+                {formatOptionalNumber(value)}
+              </text>
+            </g>
+          );
+        })}
+        {rows.map((row, index) => {
+          if (!hasKlineNumbers(row)) return null;
+          const x = padding.left + index * step;
+          const openY = yFor(row.open);
+          const closeY = yFor(row.close);
+          const highY = yFor(row.high);
+          const lowY = yFor(row.low);
+          const bodyY = Math.min(openY, closeY);
+          const bodyHeight = Math.max(2, Math.abs(closeY - openY));
+          const tone = row.close >= row.open ? "up" : "down";
+          return (
+            <g
+              className={`kline-candle ${tone} ${index === anchorIndex ? "anchor" : ""} ${index === activeIndex ? "selected" : ""}`}
+              key={`${row.ts}-${index}`}
+              onClick={() => {
+                setActiveIndex(index);
+                setLockedIndex((current) => (current === index ? null : index));
+              }}
+              onMouseEnter={() => {
+                if (lockedIndex === null) setActiveIndex(index);
+              }}
+            >
+              {index === activeIndex && (
+                <line className="kline-selected-line" x1={x} x2={x} y1={padding.top} y2={height - padding.bottom} />
+              )}
+              {index === anchorIndex && (
+                <line className="kline-anchor-line" x1={x} x2={x} y1={padding.top} y2={height - padding.bottom} />
+              )}
+              <line x1={x} x2={x} y1={highY} y2={lowY} />
+              <rect x={x - candleWidth / 2} y={bodyY} width={candleWidth} height={bodyHeight} rx="1.5" />
+              <rect
+                className="kline-hit-area"
+                height={height - padding.top - padding.bottom}
+                width={Math.max(10, step)}
+                x={x - Math.max(10, step) / 2}
+                y={padding.top}
+              />
+            </g>
+          );
+        })}
+        <line className="kline-volume-separator" x1={padding.left} x2={width - padding.right} y1={volumeTop - 9} y2={volumeTop - 9} />
+        <text className="kline-axis-text" x={padding.left} y={volumeTop - 14}>
+          成交量
+        </text>
+        {maxVolume > 0 && (
+          <text className="kline-axis-text" x={width - padding.right + 10} y={volumeTop + 4}>
+            {formatCompact(maxVolume)}
+          </text>
+        )}
+        {rows.map((row, index) => {
+          if (!hasKlineNumbers(row)) return null;
+          const volume = klineVolumeValue(row);
+          const x = padding.left + index * step;
+          const y = volumeYFor(volume);
+          const tone = row.close >= row.open ? "up" : "down";
+          return (
+            <rect
+              className={`kline-volume-bar ${tone} ${index === anchorIndex ? "anchor" : ""} ${index === activeIndex ? "selected" : ""}`}
+              height={volumeTop + volumeHeight - y}
+              key={`volume-${row.ts}-${index}`}
+              rx="1"
+              width={volumeBarWidth}
+              x={x - volumeBarWidth / 2}
+              y={y}
+            />
+          );
+        })}
+        <text className="kline-axis-text" x={padding.left} y={height - 12}>
+          {rows[0]?.time ?? ""}
+        </text>
+        <text className="kline-axis-text end" x={width - padding.right} y={height - 12}>
+          {rows.at(-1)?.time ?? ""}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
 function MetadataConditionModal({
   timeframe,
   initialCondition,
@@ -511,29 +1032,30 @@ function MetadataConditionModal({
   const selectedIndicator = items.find((item) => item.id === draft.indicatorId) ?? null;
   const options = useMemo(() => {
     const needle = metadataSearch.trim().toLowerCase();
-    if (!needle) return items;
-    return items.filter(
+    const filtered = needle ? items.filter(
       (item) =>
         item.name_zh.toLowerCase().includes(needle) ||
         item.id.toLowerCase().includes(needle) ||
         englishName(item).toLowerCase().includes(needle),
-    );
+    ) : items;
+    return filtered.slice().sort(metadataOptionSort);
   }, [items, metadataSearch]);
   const selectedLabel = selectedIndicator ? metadataOptionLabel(selectedIndicator) : "";
   const currentOperatorOptions = selectedIndicator?.data_type === "number"
     ? metadataOperatorOptions.filter((item) => item.value !== "contains")
-    : metadataOperatorOptions.filter((item) => ["eq", "ne", "contains"].includes(item.value));
+    : metadataOperatorOptions.filter((item) => ["any", "any_empty", "any_not_empty", "eq", "ne", "contains"].includes(item.value));
+  const isValueFreeOperator = metadataOperatorNoValue(draft.operator);
   const timePointError = selectedIndicator
     ? metadataTimePointError(selectedIndicator.storage_period, draft.timePoint)
     : "";
   const timeStepSeconds = selectedIndicator ? metadataTimeStepSeconds(selectedIndicator.storage_period) : 60;
   const timeDisabled = selectedIndicator ? !metadataPeriodAllowsTime(selectedIndicator.storage_period) : true;
-  const canAdd = Boolean(selectedIndicator && draft.value.trim() && !timePointError);
+  const canAdd = Boolean(selectedIndicator && metadataCanFilter(selectedIndicator) && (isValueFreeOperator || draft.value.trim()) && !timePointError);
 
   function selectIndicator(item: Indicator) {
     const nextOptions = item.data_type === "number"
       ? metadataOperatorOptions.filter((option) => option.value !== "contains")
-      : metadataOperatorOptions.filter((option) => ["eq", "ne", "contains"].includes(option.value));
+      : metadataOperatorOptions.filter((option) => ["any", "any_empty", "any_not_empty", "eq", "ne", "contains"].includes(option.value));
     setDraft((current) => ({
       ...current,
       indicatorId: item.id,
@@ -549,11 +1071,11 @@ function MetadataConditionModal({
       setError("请先选择一个元数据字段。");
       return;
     }
-    if (!selectedIndicator.raw_field) {
-      setError("这个元数据暂未接入原始字段，当前不能用于合约筛选。");
+    if (!metadataCanFilter(selectedIndicator)) {
+      setError("这个元数据暂未接入数据流，当前不能用于合约筛选。");
       return;
     }
-    if (!draft.value.trim()) {
+    if (!isValueFreeOperator && !draft.value.trim()) {
       setError("请填写筛选条件的目标值。");
       return;
     }
@@ -564,7 +1086,7 @@ function MetadataConditionModal({
     }
     onApply({
       ...draft,
-      value: draft.value.trim(),
+      value: isValueFreeOperator ? "" : draft.value.trim(),
       timePoint: normalizeDraftTimePointForPeriod(selectedIndicator.storage_period, draft.timePoint),
       id: initialCondition?.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       indicator: selectedIndicator,
@@ -584,7 +1106,11 @@ function MetadataConditionModal({
           <button onClick={() => setMode((current) => (current === "filter" ? "value" : "filter"))}>
             {mode === "filter" ? "切换取值条件" : "切换筛选条件"}
           </button>
-          <button className={draft.exclude ? "active" : ""} onClick={() => setDraft({ ...draft, exclude: !draft.exclude })}>
+          <button
+            className={draft.exclude ? "active" : ""}
+            disabled={isValueFreeOperator}
+            onClick={() => setDraft({ ...draft, exclude: !draft.exclude })}
+          >
             排除
           </button>
           <button className="add-action" disabled={!canAdd} onClick={applyCondition}>
@@ -619,7 +1145,7 @@ function MetadataConditionModal({
                   ) : options.length === 0 ? (
                     <div className="metadata-option muted">没有匹配的元数据</div>
                   ) : (
-                    options.slice(0, 80).map((item) => (
+                    options.map((item) => (
                       <button
                         key={item.id}
                         className="metadata-option"
@@ -627,7 +1153,7 @@ function MetadataConditionModal({
                         title={metadataOptionLabel(item)}
                       >
                         <span>{metadataOptionLabel(item)}</span>
-                        {!item.raw_field && <em>暂不可筛选</em>}
+                        {item.source_type === "script" ? <em>生产指标</em> : !metadataCanFilter(item) && <em>暂不可筛选</em>}
                       </button>
                     ))
                   )}
@@ -690,15 +1216,27 @@ function MetadataConditionModal({
 
               <div className="condition-form-row">
                 <label>{mode === "filter" ? "设置条件" : "取值条件"}</label>
-                <select value={draft.operator} onChange={(event) => setDraft({ ...draft, operator: event.target.value })}>
+                <select
+                  value={draft.operator}
+                  onChange={(event) => {
+                    const operator = event.target.value;
+                    setDraft({
+                      ...draft,
+                      operator,
+                      value: metadataOperatorNoValue(operator) ? "" : draft.value,
+                      exclude: metadataOperatorNoValue(operator) ? false : draft.exclude,
+                    });
+                  }}
+                >
                   {currentOperatorOptions.map((item) => (
                     <option key={item.value} value={item.value}>{item.label}</option>
                   ))}
                 </select>
                 <input
                   value={draft.value}
+                  disabled={isValueFreeOperator}
                   onChange={(event) => setDraft({ ...draft, value: event.target.value })}
-                  placeholder={selectedIndicator.data_type === "number" ? "10" : "请输入条件值"}
+                  placeholder={metadataOperatorPlaceholder(draft.operator, selectedIndicator.data_type)}
                   autoFocus
                 />
               </div>
@@ -739,8 +1277,258 @@ function MetadataConditionModal({
   );
 }
 
+function ContractListPage({
+  summary,
+  onSummaryRefresh,
+}: {
+  summary: DataSummary | null;
+  onSummaryRefresh: () => void | Promise<void>;
+}) {
+  const periods = summary?.timeframes.map((item) => item.key) ?? ["1m", "5m", "15m", "1H", "1D"];
+  const [storagePeriod, setStoragePeriod] = useState("1m");
+  const [date, setDate] = useState("");
+  const [query, setQuery] = useState("");
+  const [data, setData] = useState<ContractListResponse | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<ContractUpdateStatus | null>(null);
+  const [startingUpdate, setStartingUpdate] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const updateWasRunningRef = useRef(false);
+
+  useEffect(() => {
+    const current = currentTimeframe(summary, storagePeriod);
+    if (current) {
+      setDate(preferredContractDate(current));
+    }
+  }, [summary, storagePeriod]);
+
+  useEffect(() => {
+    if (date) void loadContracts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, storagePeriod]);
+
+  useEffect(() => {
+    void loadUpdateStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!updateStatus?.running) return;
+    const timer = window.setInterval(() => {
+      void loadUpdateStatus();
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [updateStatus?.running]);
+
+  useEffect(() => {
+    if (updateStatus?.running) {
+      updateWasRunningRef.current = true;
+      return;
+    }
+    if (!updateStatus || !updateWasRunningRef.current) return;
+    updateWasRunningRef.current = false;
+    void onSummaryRefresh();
+    void loadContracts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [updateStatus?.running, updateStatus?.success]);
+
+  async function loadContracts() {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await fetchActiveContracts({
+        timeframe: storagePeriod,
+        date: date || undefined,
+        query,
+        limit: 5000,
+      });
+      setData(result);
+      if (!date && result.date) setDate(result.date);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "合约列表加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadUpdateStatus() {
+    try {
+      const status = await fetchContractUpdateStatus(12000);
+      setUpdateStatus(status);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新状态读取失败");
+    }
+  }
+
+  async function startUpdateDeploy() {
+    setStartingUpdate(true);
+    setError(null);
+    try {
+      const status = await startContractUpdateDeploy({
+        force: true,
+        limit: 300,
+        build_daily: true,
+        daily_days: 10,
+      });
+      setUpdateStatus(status);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新部署启动失败");
+    } finally {
+      setStartingUpdate(false);
+    }
+  }
+
+  const rows = data?.rows ?? [];
+  const tf = currentTimeframe(summary, storagePeriod);
+  const updateRunning = Boolean(updateStatus?.running);
+  const updateLabel = updateStatus?.stage_label ?? "未运行";
+
+  return (
+    <section className="metadata-page contract-list-page">
+      <div className="metadata-page-head">
+        <div>
+          <h1>合约列表 ({data?.total_count ?? rows.length})</h1>
+          <p className="contract-page-subtitle">
+            记录当前仍在交易、并展示本地最新K线数据的合约。
+          </p>
+        </div>
+        <div className="metadata-actions">
+          <button
+            className="primary-action"
+            disabled={startingUpdate || updateRunning}
+            onClick={() => void startUpdateDeploy()}
+          >
+            {updateRunning ? "更新中..." : startingUpdate ? "启动中..." : "更新部署"}
+          </button>
+          <button className="secondary-action" onClick={() => void loadContracts()}>
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div className="contract-summary-strip">
+        <div>
+          <span>数据周期</span>
+          <strong>{timeframeLabels[storagePeriod] ?? storagePeriod}</strong>
+        </div>
+        <div>
+          <span>基准日期</span>
+          <strong>{formatDateBadge(data?.date ?? date) || "--"}</strong>
+        </div>
+        <div>
+          <span>在线合约</span>
+          <strong>{data?.total_count ?? 0}</strong>
+        </div>
+        <div>
+          <span>最新数据分区</span>
+          <strong>{formatDateBadge(tf?.latest_date ?? "") || "--"}</strong>
+        </div>
+      </div>
+
+      <div className={updateRunning ? "contract-update-panel running" : updateStatus?.success === false ? "contract-update-panel failed" : "contract-update-panel"}>
+        <div className="contract-update-main">
+          <span>更新部署</span>
+          <strong>{updateLabel}</strong>
+          {updateStatus?.error && <em>{updateStatus.error}</em>}
+        </div>
+        <div className="contract-update-meta">
+          <span>数据目录：{updateStatus?.data_root ?? "等待状态"}</span>
+          <span>{updateStatus?.finished_at ? `完成时间：${formatDateTime(updateStatus.finished_at)}` : updateStatus?.started_at ? `开始时间：${formatDateTime(updateStatus.started_at)}` : "尚未启动"}</span>
+        </div>
+        <details className="contract-update-log">
+          <summary>查看日志</summary>
+          <pre>{updateStatus?.log_tail || "暂无日志"}</pre>
+        </details>
+      </div>
+
+      <div className="metadata-filterbar contract-filterbar">
+        <label>
+          <span>关键词</span>
+          <input
+            value={query}
+            placeholder="BTC / ETH / 合约代码"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void loadContracts();
+            }}
+          />
+        </label>
+        <label>
+          <span>数据周期</span>
+          <select value={storagePeriod} onChange={(event) => setStoragePeriod(event.target.value)}>
+            {periods.map((period) => (
+              <option key={period} value={period}>{timeframeLabels[period] ?? period}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>数据日期</span>
+          <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+        </label>
+        <button className="query-button" disabled={loading} onClick={() => void loadContracts()}>
+          查询
+        </button>
+      </div>
+
+      <div className="metadata-table-shell">
+        {error && <div className="inline-error">{error}</div>}
+        <div className="metadata-table-wrap contract-list-table-wrap">
+          <table className="metadata-table contract-list-table">
+            <thead>
+              <tr>
+                <th className="contract-index-col">序号</th>
+                <th>合约</th>
+                <th>标的</th>
+                <th>最新价格</th>
+                <th>最新K线时间</th>
+                <th>周期</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={7}>
+                    <EmptyState title="正在加载合约" text="读取当前在线合约与本地K线数据。" />
+                  </td>
+                </tr>
+              ) : rows.length === 0 ? (
+                <tr>
+                  <td colSpan={7}>
+                    <EmptyState title="暂无合约" text="当前条件下没有找到合约，换个日期或搜索词试试。" />
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row, index) => (
+                  <tr key={row.inst_id}>
+                    <td className="contract-index-col">{index + 1}</td>
+                    <td className="contract-inst-id">{row.inst_id}</td>
+                    <td>{row.symbol || compactSymbolName(row.inst_id)}</td>
+                    <td className="numeric-id">{formatContractPrice(row.latest_close)}</td>
+                    <td>{row.latest_time ?? "--"}</td>
+                    <td>{timeframeLabels[data?.timeframe ?? storagePeriod] ?? data?.timeframe ?? storagePeriod}</td>
+                    <td><span className="contract-status-badge">交易中</span></td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="metadata-pagination">
+          <span>共{data?.total_count ?? rows.length}条</span>
+          <button disabled>‹</button>
+          <button className="current-page">1</button>
+          <button disabled>›</button>
+          <select value="all" disabled>
+            <option value="all">全部</option>
+          </select>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function IndicatorProductionPage({ summary }: { summary: DataSummary | null }) {
-  const periods = summary?.timeframes.map((item) => item.key) ?? ["1m", "5m", "15m", "1H"];
+  const periods = summary?.timeframes.map((item) => item.key) ?? ["1m", "5m", "15m", "1H", "1D"];
   const [items, setItems] = useState<Indicator[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTarget, setEditingTarget] = useState<Indicator | null>(null);
@@ -981,26 +1769,238 @@ function IndicatorProductionPage({ summary }: { summary: DataSummary | null }) {
       )}
 
       {aiTarget && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTarget(null)}>
-          <div className="script-preview-modal ai-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
-              <div>
-                <span className="eyebrow">AI助力</span>
-                <h2>{aiTarget.name_zh}</h2>
-              </div>
-              <button className="close-button" onClick={() => setAiTarget(null)}>×</button>
-            </div>
-            <p className="ai-help-copy">
-              下一步这里会根据指标名称、输入周期和目标输出，帮你生成 shell 脚本骨架、Python 计算逻辑和回补命令。
-            </p>
-            <textarea
-              readOnly
-              value={`请帮我为指标「${aiTarget.name_zh}」生成一个 ${aiTarget.storage_period} 周期的指标生产脚本，输出 inst_id,ts,value。`}
-            />
-          </div>
-        </div>
+        <AiScriptWorkspaceModal
+          indicator={aiTarget}
+          periods={periods}
+          summary={summary}
+          onClose={() => setAiTarget(null)}
+        />
       )}
     </section>
+  );
+}
+
+function AiScriptWorkspaceModal({
+  indicator,
+  periods,
+  summary,
+  onClose,
+}: {
+  indicator: Indicator;
+  periods: string[];
+  summary: DataSummary | null;
+  onClose: () => void;
+}) {
+  const [workspace, setWorkspace] = useState<ScriptWorkspaceResponse | null>(null);
+  const [requirement, setRequirement] = useState("");
+  const [inputTimeframe, setInputTimeframe] = useState(indicator.storage_period);
+  const [runDate, setRunDate] = useState(defaultRunDate(summary, indicator.storage_period));
+  const [script, setScript] = useState("");
+  const [result, setResult] = useState<ScriptTrialRunResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [savingScript, setSavingScript] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setInputTimeframe(indicator.storage_period);
+    setRunDate(defaultRunDate(summary, indicator.storage_period));
+    void loadWorkspace();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indicator.id]);
+
+  function changeInputTimeframe(next: string) {
+    setInputTimeframe(next);
+    setRunDate(defaultRunDate(summary, next));
+  }
+
+  async function loadWorkspace() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchScriptWorkspace(indicator.id);
+      setWorkspace(data);
+      setScript(data.script);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "脚本工作台加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function generateScript() {
+    setGenerating(true);
+    setError(null);
+    try {
+      const data = await generateScriptWithAi({
+        indicatorId: indicator.id,
+        requirement,
+        inputTimeframe,
+      });
+      setScript(data.script);
+      setWorkspace((current) => current ? { ...current, prompt: data.prompt, model: data.model, script: data.script } : current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "AI 生成脚本失败");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function saveScript() {
+    setSavingScript(true);
+    setError(null);
+    try {
+      const data = await saveScriptIndicatorScript({ indicatorId: indicator.id, script });
+      setScript(data.script);
+      setWorkspace((current) => current ? { ...current, script: data.script, script_path: data.script_path } : current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存脚本失败");
+    } finally {
+      setSavingScript(false);
+    }
+  }
+
+  async function trialRun() {
+    if (!runDate) {
+      setError("请选择试运行日期。");
+      return;
+    }
+    setRunning(true);
+    setError(null);
+    setResult(null);
+    try {
+      const data = await trialRunScriptIndicator({
+        indicatorId: indicator.id,
+        date: runDate,
+        inputTimeframe,
+        script,
+        limit: 200,
+      });
+      setResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "试运行失败");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop ai-workspace-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="script-ai-workspace-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <span className="eyebrow">AI助力 · 脚本工作台</span>
+            <h2>{indicator.name_zh}</h2>
+          </div>
+          <button className="close-button" onClick={onClose}>×</button>
+        </div>
+
+        {error && <div className="inline-error ai-workspace-error">{error}</div>}
+
+        {loading ? (
+          <EmptyState title="正在加载脚本工作台" text="读取脚本、内置提示词和本地运行目录。" />
+        ) : (
+          <>
+            <div className="ai-workspace-grid">
+              <aside className="ai-workspace-side">
+                <label>
+                  指标需求
+                  <textarea
+                    value={requirement}
+                    onChange={(event) => setRequirement(event.target.value)}
+                    placeholder="描述你想计算的指标，例如：计算每个合约当前15分钟成交额 / 过去1小时平均15分钟成交额。"
+                  />
+                </label>
+                <div className="ai-workspace-row">
+                  <label>
+                    输入周期
+                    <select value={inputTimeframe} onChange={(event) => changeInputTimeframe(event.target.value)}>
+                      {periods.map((period) => (
+                        <option value={period} key={period}>{timeframeLabels[period] ?? period}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    试运行日期
+                    <input type="date" value={runDate} onChange={(event) => setRunDate(event.target.value)} />
+                  </label>
+                </div>
+                <div className="ai-workspace-actions">
+                  <button className="primary-action" disabled={generating} onClick={() => void generateScript()}>
+                    {generating ? "生成中..." : "AI生成脚本"}
+                  </button>
+                  <button className="secondary-action" disabled={savingScript || !script.trim()} onClick={() => void saveScript()}>
+                    {savingScript ? "保存中..." : "保存脚本"}
+                  </button>
+                  <button className="run-action" disabled={running || !script.trim()} onClick={() => void trialRun()}>
+                    {running ? "试运行中..." : "试运行"}
+                  </button>
+                </div>
+                <div className="ai-workspace-meta">
+                  <span>模型：{workspace?.model || "--"}</span>
+                  <span>{workspace?.openai_configured ? "OpenAI Key 已配置" : "OpenAI Key 未配置"}</span>
+                  <span>输出目录：{workspace?.output_dir || "--"}</span>
+                </div>
+              </aside>
+
+              <main className="ai-code-panel">
+                <div className="ai-code-head">
+                  <strong>可运行脚本</strong>
+                  <span>必须写入环境变量 OUTPUT_FILE 指定的 CSV。</span>
+                </div>
+                <textarea value={script} onChange={(event) => setScript(event.target.value)} spellCheck={false} />
+              </main>
+            </div>
+
+            <details className="ai-prompt-preview">
+              <summary>查看内置提示词</summary>
+              <pre>{workspace?.prompt}</pre>
+            </details>
+
+            {result && (
+              <div className={result.success ? "ai-run-result success" : "ai-run-result failed"}>
+                <div className="ai-run-head">
+                  <strong>{result.success ? "试运行成功" : "试运行失败"}</strong>
+                  <span>耗时 {result.elapsed_ms}ms · 输出 {result.output_count} 条 · 返回 {result.returned_count} 条</span>
+                  <span>{result.output_file}</span>
+                </div>
+                {result.rows.length > 0 && (
+                  <div className="ai-run-table-wrap">
+                    <table className="ai-run-table">
+                      <thead>
+                        <tr>
+                          <th>序号</th>
+                          <th>合约</th>
+                          <th>时间戳</th>
+                          <th>指标值</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.rows.map((row, index) => (
+                          <tr key={`${row.inst_id}-${index}`}>
+                            <td>{index + 1}</td>
+                            <td>{row.inst_id}</td>
+                            <td>{row.ts}</td>
+                            <td>{row.value}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {(result.stdout || result.stderr) && (
+                  <div className="ai-run-logs">
+                    {result.stdout && <pre>{result.stdout}</pre>}
+                    {result.stderr && <pre className="stderr">{result.stderr}</pre>}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1032,7 +2032,7 @@ function MetadataConditionCard({
 }
 
 function IndicatorWarehousePage({ summary }: { summary: DataSummary | null }) {
-  const periods = summary?.timeframes.map((item) => item.key) ?? ["1m", "5m", "15m", "1H"];
+  const periods = summary?.timeframes.map((item) => item.key) ?? ["1m", "5m", "15m", "1H", "1D"];
   const [catalog, setCatalog] = useState<IndicatorCatalogResponse | null>(null);
   const [storagePeriod, setStoragePeriod] = useState("all");
   const [search, setSearch] = useState("");
@@ -1342,10 +2342,6 @@ function IndicatorWarehousePage({ summary }: { summary: DataSummary | null }) {
             </div>
             <div className="preview-toolbar-title">预览数据</div>
             <div className="preview-toolbar">
-              <label className="value-toggle">
-                <input type="checkbox" checked readOnly />
-                <span>有值</span>
-              </label>
               <label className="preview-date-field">
                 <span>日期：</span>
                 <input
@@ -1549,9 +2545,75 @@ function toMetadataFilterPayload(condition: MetadataCondition): ScreenerMetadata
   };
 }
 
+function toFavoriteCondition(condition: MetadataCondition): ScreenerFavoriteCondition {
+  return {
+    id: condition.id,
+    indicator_id: condition.indicator.id,
+    indicator: condition.indicator,
+    time_mode: condition.timeMode,
+    time_offset: condition.timeOffset,
+    time_point: condition.timePoint,
+    operator: condition.operator,
+    value: condition.value,
+    truncate_mode: condition.truncateMode,
+    truncate_count: condition.truncateCount,
+    external_relation: condition.externalRelation,
+    time_range: condition.timeRange,
+    exclude: condition.exclude,
+  };
+}
+
+function fromFavoriteCondition(condition: ScreenerFavoriteCondition): MetadataCondition | null {
+  if (!condition.indicator) return null;
+  return {
+    id: condition.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    indicatorId: condition.indicator_id || condition.indicator.id,
+    indicator: condition.indicator,
+    timeMode: condition.time_mode || "previous_trading_day",
+    timeOffset: condition.time_offset || "1",
+    timePoint: condition.time_point || "",
+    operator: condition.operator || "gt",
+    value: condition.value || "",
+    truncateMode: condition.truncate_mode || "none",
+    truncateCount: condition.truncate_count || "",
+    externalRelation: Boolean(condition.external_relation),
+    timeRange: Boolean(condition.time_range),
+    exclude: Boolean(condition.exclude),
+  };
+}
+
+function favoriteName(conditions: MetadataCondition[], date: string) {
+  const names = conditions.slice(0, 2).map((condition) => condition.indicator.name_zh);
+  const suffix = conditions.length > 2 ? `等${conditions.length}个条件` : `${conditions.length}个条件`;
+  return `${names.join(" + ")} ${suffix} · ${formatDateBadge(date) || "未选日期"}`;
+}
+
+function favoriteConditionText(condition: ScreenerFavoriteCondition) {
+  const restored = fromFavoriteCondition(condition);
+  if (!restored) return condition.indicator_id;
+  return `${restored.indicator.name_zh} ${metadataConditionText(restored)}`;
+}
+
+function klinePeriodLabel(period: string) {
+  return klinePeriodOptions.find((option) => option.value === period)?.label ?? timeframeLabels[period] ?? period;
+}
+
 function metadataOptionLabel(item: Indicator) {
   const period = timeframeLabels[item.storage_period] ?? item.storage_period;
-  return `指标仓库/数字币/${period}@${item.name_zh}(交易日)`;
+  const source = item.source_type === "script" ? "指标生产" : "指标仓库";
+  return `${source}/数字币/${period}@${item.name_zh}(交易日)`;
+}
+
+function metadataCanFilter(item: Indicator) {
+  return Boolean(item.raw_field || item.source_type === "script");
+}
+
+function metadataOptionSort(a: Indicator, b: Indicator) {
+  const aPriority = a.source_type === "script" ? 0 : a.raw_field ? 1 : 2;
+  const bPriority = b.source_type === "script" ? 0 : b.raw_field ? 1 : 2;
+  if (aPriority !== bPriority) return aPriority - bPriority;
+  if (a.storage_period !== b.storage_period) return a.storage_period.localeCompare(b.storage_period);
+  return a.name_zh.localeCompare(b.name_zh, "zh-Hans-CN");
 }
 
 function metadataConditionText(condition: MetadataCondition) {
@@ -1562,9 +2624,29 @@ function metadataConditionText(condition: MetadataCondition) {
       ? "当前交易日"
       : "最新可用时间";
   const pointText = conditionTimePointText(condition);
+  if (condition.operator === "any") {
+    return `${timeText}${pointText} 任意取值`;
+  }
+  if (condition.operator === "any_empty") {
+    return `${timeText}${pointText} 任意为空`;
+  }
+  if (condition.operator === "any_not_empty") {
+    return `${timeText}${pointText} 任意不为空`;
+  }
   const unit = condition.indicator.unit ? ` ${condition.indicator.unit}` : "";
   const exclude = condition.exclude ? "排除：" : "";
   return `${exclude}${timeText}${pointText} ${operator} ${condition.value}${unit}`;
+}
+
+function metadataOperatorNoValue(value: string) {
+  return ["any", "any_empty", "any_not_empty"].includes(value);
+}
+
+function metadataOperatorPlaceholder(value: string, dataType: Indicator["data_type"]) {
+  if (value === "any") return "只取值，不筛选";
+  if (value === "any_empty") return "筛选空值";
+  if (value === "any_not_empty") return "筛选非空值";
+  return dataType === "number" ? "10" : "请输入条件值";
 }
 
 function metadataOperatorLabel(value: string) {
@@ -1717,6 +2799,16 @@ function preferredQueryDate(timeframe: TimeframeSummary) {
   return timeframe.latest_date ?? timeframe.recommended_date ?? "";
 }
 
+function preferredContractDate(timeframe: TimeframeSummary) {
+  return timeframe.latest_date ?? timeframe.recommended_date ?? "";
+}
+
+function defaultRunDate(summary: DataSummary | null, period: string) {
+  const timeframe = summary?.timeframes.find((item) => item.key === period);
+  if (!timeframe) return localDateString();
+  return preferredQueryDate(timeframe) || localDateString();
+}
+
 function localDateString() {
   const now = new Date();
   const year = now.getFullYear();
@@ -1735,6 +2827,19 @@ function weekdayLabel(value: string) {
   const date = new Date(`${value}T00:00:00`);
   if (Number.isNaN(date.getTime())) return "";
   return `星期${["日", "一", "二", "三", "四", "五", "六"][date.getDay()]}`;
+}
+
+function formatDateTime(value: number | null | undefined) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
 function compactSymbolName(value: string) {
@@ -1854,6 +2959,39 @@ function formatPercent(value: number) {
 
 function formatNumber(value: number) {
   return Intl.NumberFormat("zh-CN", { maximumFractionDigits: 8 }).format(value);
+}
+
+function formatOptionalNumber(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "--";
+  return formatNumber(value);
+}
+
+function hasKlineNumbers(row: ContractKlineRow): row is ContractKlineRow & {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+} {
+  return [row.open, row.high, row.low, row.close].every(
+    (value) => typeof value === "number" && Number.isFinite(value),
+  );
+}
+
+function klineVolumeValue(row: ContractKlineRow) {
+  return row.vol_ccy_quote ?? row.vol_ccy ?? row.vol ?? 0;
+}
+
+function formatKlineChangePercent(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+function formatContractPrice(value: string) {
+  if (!value) return "--";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  return Intl.NumberFormat("zh-CN", { maximumFractionDigits: 10 }).format(parsed);
 }
 
 function formatCompact(value: number) {

@@ -1,15 +1,57 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from .data_source import data_source_service
+from .favorite_repository import screener_favorite_repository
 from .indicator_repository import IndicatorCreate, indicator_repository
 from .screener import builtin_indicators, query_screener
+from . import contract_update_service, script_indicator_service
 
 app = FastAPI(title="Crypto Screener Local API", version="0.1.0")
+
+
+class ScriptSaveRequest(BaseModel):
+    script: str = Field(min_length=1)
+
+
+class ScriptGenerateRequest(BaseModel):
+    requirement: str = ""
+    input_timeframe: str = "1m"
+
+
+class ScriptTrialRunRequest(BaseModel):
+    date: str
+    input_timeframe: str = "1m"
+    script: str | None = None
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class ContractUpdateRequest(BaseModel):
+    force: bool = True
+    backfill_history: bool = False
+    pages: int | None = Field(default=None, ge=1, le=200)
+    limit: int = Field(default=300, ge=1, le=300)
+    build_daily: bool = True
+    daily_days: int = Field(default=10, ge=1, le=365)
+    symbol_limit: int | None = Field(default=None, ge=1, le=1000)
+
+
+class ScreenerFavoriteCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    timeframe: str = "1m"
+    date: str | None = None
+    as_of_time: str = ""
+    min_ret_15m: str = ""
+    min_vol_ratio_60: str = ""
+    min_vol_quote_15m: str = ""
+    sort_by: str = "ret_15m"
+    metadata_conditions: list[dict[str, Any]] = Field(default_factory=list)
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +86,66 @@ def data_source_preview(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/contracts/active")
+def active_contracts(
+    timeframe: str = "1m",
+    date: str | None = None,
+    query: str | None = None,
+    limit: int = Query(default=2000, ge=1, le=5000),
+) -> dict:
+    try:
+        return data_source_service.active_contracts(timeframe, date, query, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/contracts/update-deploy")
+def start_contract_update_deploy(payload: ContractUpdateRequest) -> dict:
+    try:
+        return contract_update_service.contract_update_service.start(
+            force=payload.force,
+            backfill_history=payload.backfill_history,
+            pages=payload.pages,
+            limit=payload.limit,
+            build_daily=payload.build_daily,
+            daily_days=payload.daily_days,
+            symbol_limit=payload.symbol_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/contracts/update-deploy/status")
+def contract_update_deploy_status(
+    tail_chars: int = Query(default=12000, ge=0, le=20000),
+) -> dict:
+    return contract_update_service.contract_update_service.status(tail_chars=tail_chars)
+
+
+@app.get("/api/contracts/{inst_id}/klines")
+def contract_kline_window(
+    inst_id: str,
+    timeframe: str = "1m",
+    date: str = Query(...),
+    anchor_ts: int | None = None,
+    before: int = Query(default=33, ge=1, le=300),
+    after: int = Query(default=33, ge=0, le=300),
+) -> dict:
+    try:
+        return data_source_service.kline_window(
+            timeframe=timeframe,
+            date=date,
+            inst_id=inst_id,
+            anchor_ts=anchor_ts,
+            before=before,
+            after=after,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/indicators/{indicator_id}/preview")
 def indicator_value_preview(
     indicator_id: str,
@@ -55,6 +157,21 @@ def indicator_value_preview(
     indicator = indicator_repository.get(indicator_id)
     if not indicator:
         raise HTTPException(status_code=404, detail=f"指标不存在：{indicator_id}")
+
+    if indicator.get("source_type") == "script":
+        try:
+            preview = script_indicator_service.preview_output(
+                indicator_id,
+                date=date,
+                time_text=time,
+                query=query,
+                limit=limit,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"indicator": indicator, **preview}
 
     raw_field = indicator.get("raw_field")
     if not raw_field:
@@ -127,6 +244,56 @@ def delete_indicator(indicator_id: str) -> dict:
     return {"deleted": deleted["id"]}
 
 
+@app.get("/api/script-indicators/{indicator_id:path}/workspace")
+def script_indicator_workspace(indicator_id: str) -> dict:
+    try:
+        return script_indicator_service.workspace(indicator_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/script-indicators/{indicator_id:path}/script")
+def save_script_indicator_script(indicator_id: str, payload: ScriptSaveRequest) -> dict:
+    try:
+        return script_indicator_service.save_script(indicator_id, payload.script)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/script-indicators/{indicator_id:path}/ai-generate")
+def generate_script_indicator_script(indicator_id: str, payload: ScriptGenerateRequest) -> dict:
+    try:
+        return script_indicator_service.generate_script(
+            indicator_id,
+            requirement=payload.requirement,
+            input_timeframe=payload.input_timeframe,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/script-indicators/{indicator_id:path}/trial-run")
+def trial_run_script_indicator(indicator_id: str, payload: ScriptTrialRunRequest) -> dict:
+    try:
+        return script_indicator_service.trial_run(
+            indicator_id,
+            date=payload.date,
+            input_timeframe=payload.input_timeframe,
+            script=payload.script,
+            limit=payload.limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/indicators/catalog/reset-seed")
 def reset_indicator_seed() -> dict:
     items = indicator_repository.reset_seed()
@@ -136,6 +303,28 @@ def reset_indicator_seed() -> dict:
 @app.get("/api/indicators/builtin")
 def indicators_builtin() -> dict:
     return {"items": builtin_indicators()}
+
+
+@app.get("/api/screener/favorites")
+def screener_favorites() -> dict:
+    return {"items": screener_favorite_repository.list()}
+
+
+@app.post("/api/screener/favorites", status_code=201)
+def create_screener_favorite(payload: ScreenerFavoriteCreate) -> dict:
+    try:
+        return screener_favorite_repository.create(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/screener/favorites/{favorite_id}")
+def delete_screener_favorite(favorite_id: str) -> dict:
+    try:
+        deleted = screener_favorite_repository.delete(favorite_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"deleted": deleted}
 
 
 @app.get("/api/screener/query")
