@@ -17,13 +17,16 @@ import {
   IndicatorCatalogResponse,
   ScreenerFavorite,
   ScreenerFavoriteCondition,
+  SignalEvent,
+  SignalSet,
   ScriptTrialRunResponse,
   ScriptWorkspaceResponse,
   ScreenerMetadataFilterPayload,
   ScreenerResponse,
   ScreenerRow,
-  createBacktestRun,
+  createBacktestRunFromSignalSet,
   createScreenerFavorite,
+  createSignalSet,
   TimeframeSummary,
   createIndicator,
   deleteIndicator,
@@ -39,6 +42,8 @@ import {
   fetchIndicatorValuePreview,
   fetchIndicators,
   fetchScreenerFavorites,
+  fetchSignalSetEvents,
+  fetchSignalSets,
   fetchScriptWorkspace,
   fetchSummary,
   generateScriptWithAi,
@@ -65,6 +70,8 @@ const klinePeriodOptions = [
 ];
 const backtestSignalTimeframeOptions = [
   { value: "1H", label: "1小时信号" },
+  { value: "5m", label: "5分钟信号" },
+  { value: "1m", label: "1分钟信号" },
   { value: "1D", label: "日线信号" },
 ];
 const backtestEntryTimeframeOptions = [
@@ -1087,23 +1094,38 @@ function KlineChart({
 function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const initialRange = suggestedBacktestRange(summary, "1H", "daily");
   const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
+  const [signalSets, setSignalSets] = useState<SignalSet[]>([]);
+  const [signalEvents, setSignalEvents] = useState<SignalEvent[]>([]);
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [activeRun, setActiveRun] = useState<BacktestRun | null>(null);
   const [form, setForm] = useState({
     favoriteId: "",
-    name: "",
+    signalSetId: "",
+    signalSetName: "",
+    backtestName: "",
     startDate: initialRange.start,
     endDate: initialRange.end,
     signalTimeframe: "1H",
     signalMode: "daily",
-    entryTimeframe: "1m",
-    holdHours: "24",
-    positionUsdt: "100",
-    maxPositions: "5",
+    side: "short",
+    entryTimeframe: "5m",
+    entryRule: "consecutive_green_bars",
+    entryWindowMinutes: "60",
+    entryConsecutiveBars: "2",
+    entryMinGainPctEach: "2",
+    exitHoldMinutes: "440",
+    stopLossPct: "15",
+    stopModel: "bot_like_checkpoint",
+    positionUsdt: "500",
+    leverage: "1",
+    maxPositions: "2",
     feeBps: "5",
     slippageBps: "5",
   });
   const [loadingFavorites, setLoadingFavorites] = useState(true);
+  const [loadingSignalSets, setLoadingSignalSets] = useState(true);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [generatingSignalSet, setGeneratingSignalSet] = useState(false);
   const [running, setRunning] = useState(false);
   const [loadingRun, setLoadingRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1116,6 +1138,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
 
   useEffect(() => {
     void loadFavorites();
+    void loadSignalSets();
     void loadRuns();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1128,6 +1151,15 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       endDate: current.endDate || nextRange.end,
     }));
   }, [summary, form.signalTimeframe, form.signalMode]);
+
+  useEffect(() => {
+    if (form.signalSetId) {
+      void loadSignalEvents(form.signalSetId);
+    } else {
+      setSignalEvents([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.signalSetId]);
 
   async function loadFavorites() {
     setLoadingFavorites(true);
@@ -1143,6 +1175,34 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       setError(err instanceof Error ? err.message : "收藏条件加载失败");
     } finally {
       setLoadingFavorites(false);
+    }
+  }
+
+  async function loadSignalSets() {
+    setLoadingSignalSets(true);
+    try {
+      const data = await fetchSignalSets();
+      setSignalSets(data.items);
+      setForm((current) => ({
+        ...current,
+        signalSetId: current.signalSetId || data.items[0]?.id || "",
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "信号池加载失败");
+    } finally {
+      setLoadingSignalSets(false);
+    }
+  }
+
+  async function loadSignalEvents(signalSetId: string) {
+    setLoadingEvents(true);
+    try {
+      const data = await fetchSignalSetEvents(signalSetId, 200);
+      setSignalEvents(data.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "信号明细加载失败");
+    } finally {
+      setLoadingEvents(false);
     }
   }
 
@@ -1169,28 +1229,68 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     }
   }
 
-  async function startBacktest() {
+  async function generateSignalSet() {
     if (!form.favoriteId) {
       setError("请先选择一个收藏条件。");
+      return;
+    }
+    setGeneratingSignalSet(true);
+    setError(null);
+    try {
+      const signalSet = await createSignalSet({
+        favorite_id: form.favoriteId,
+        name: form.signalSetName.trim(),
+        start_date: form.startDate,
+        end_date: form.endDate,
+        signal_timeframe: form.signalTimeframe,
+        signal_mode: form.signalMode as "daily" | "each_bar_close",
+        checkpoint_limit: form.signalMode === "each_bar_close"
+          ? form.signalTimeframe === "1m"
+            ? 2000
+            : form.signalTimeframe === "1H"
+              ? 5000
+            : 600
+          : 1500,
+      });
+      setSignalSets((current) => [signalSet, ...current.filter((item) => item.id !== signalSet.id)]);
+      setForm((current) => ({ ...current, signalSetId: signalSet.id }));
+      if (signalSet.status === "failed") {
+        setError(signalSet.error || "信号池生成失败");
+      } else {
+        void loadSignalEvents(signalSet.id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "信号池生成失败");
+    } finally {
+      setGeneratingSignalSet(false);
+    }
+  }
+
+  async function startBacktest() {
+    if (!form.signalSetId) {
+      setError("请先生成或选择一个信号池。");
       return;
     }
     setRunning(true);
     setError(null);
     try {
-      const run = await createBacktestRun({
-        favorite_id: form.favoriteId,
-        name: form.name.trim(),
-        start_date: form.startDate,
-        end_date: form.endDate,
-        signal_timeframe: form.signalTimeframe,
-        signal_mode: form.signalMode as "daily" | "each_bar_close",
+      const run = await createBacktestRunFromSignalSet({
+        signal_set_id: form.signalSetId,
+        name: form.backtestName.trim(),
+        side: form.side as "long" | "short",
         entry_timeframe: form.entryTimeframe,
-        hold_hours: Number(form.holdHours),
+        entry_rule: form.entryRule as "next_bar_open" | "consecutive_green_bars",
+        entry_window_minutes: Number(form.entryWindowMinutes),
+        entry_consecutive_bars: Number(form.entryConsecutiveBars),
+        entry_min_gain_pct_each: Number(form.entryMinGainPctEach),
+        exit_hold_minutes: Number(form.exitHoldMinutes),
+        stop_loss_pct: Number(form.stopLossPct),
+        stop_model: form.stopModel as "bot_like_checkpoint" | "hard_stop_intrabar",
         position_usdt: Number(form.positionUsdt),
+        leverage: Number(form.leverage),
         max_positions: Number(form.maxPositions),
         fee_bps_per_side: Number(form.feeBps),
         slippage_bps_per_side: Number(form.slippageBps),
-        checkpoint_limit: form.signalMode === "each_bar_close" ? 500 : 1000,
       });
       setActiveRun(run);
       if (run.status === "failed") {
@@ -1272,12 +1372,14 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   }
 
   const selectedFavorite = favorites.find((item) => item.id === form.favoriteId) ?? null;
+  const selectedSignalSet = signalSets.find((item) => item.id === form.signalSetId) ?? null;
   const result = activeRun?.result ?? null;
   const summaryStats = result?.summary;
   const trades = result?.trades ?? [];
   const checkpoints = result?.checkpoints ?? [];
   const signalModeDisabled = form.signalTimeframe === "1D";
   const tradeKlinePeriod = activeRun?.config.entry_timeframe ?? form.entryTimeframe;
+  const selectedSignalSummary = selectedSignalSet?.summary ?? null;
 
   return (
     <section className="metadata-page backtest-page">
@@ -1285,150 +1387,304 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
         <div>
           <h1>回测验证</h1>
           <p className="contract-page-subtitle">
-            直接复用收藏的选币条件生成信号，按下一根K线开盘买入，固定持仓后卖出。
+            先把收藏条件离线生成信号池，再配置入场、出场、仓位规则做验证；成交明细可直接打开K线看买卖点。
           </p>
         </div>
         <div className="metadata-actions">
-          <button className="secondary-action" onClick={() => { void loadFavorites(); void loadRuns(); }}>
+          <button className="secondary-action" onClick={() => { void loadFavorites(); void loadSignalSets(); void loadRuns(); }}>
             刷新
           </button>
-          <button className="primary-action" disabled={running || loadingFavorites} onClick={() => void startBacktest()}>
-            {running ? "回测中..." : "开始回测"}
+          <button className="primary-action" disabled={running || generatingSignalSet || loadingSignalSets} onClick={() => void startBacktest()}>
+            {running ? "回测中..." : "基于信号池回测"}
           </button>
         </div>
       </div>
 
       <div className="backtest-layout">
-        <form
-          className="backtest-card backtest-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void startBacktest();
-          }}
-        >
-          <div className="backtest-card-head">
-            <span className="eyebrow">Signal Setup</span>
-            <strong>信号与成交规则</strong>
-          </div>
-          <div className="backtest-form-grid">
-            <label className="field wide">
-              <span>收藏条件</span>
-              <select value={form.favoriteId} onChange={(event) => updateForm("favoriteId", event.target.value)}>
-                {favorites.length === 0 ? (
-                  <option value="">暂无收藏条件</option>
-                ) : (
-                  favorites.map((favorite) => (
-                    <option key={favorite.id} value={favorite.id}>
-                      {favorite.name} ({favorite.condition_count} 条)
+        <div className="backtest-main-stack">
+          <form
+            className="backtest-card backtest-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void generateSignalSet();
+            }}
+          >
+            <div className="backtest-card-head">
+              <span className="eyebrow">Step 1</span>
+              <strong>收藏条件生成信号池</strong>
+              <em>{selectedFavorite ? `${selectedFavorite.condition_count} 条条件` : "先选择收藏"}</em>
+            </div>
+            <div className="backtest-form-grid">
+              <label className="field wide">
+                <span>收藏条件</span>
+                <select value={form.favoriteId} onChange={(event) => updateForm("favoriteId", event.target.value)}>
+                  {favorites.length === 0 ? (
+                    <option value="">暂无收藏条件</option>
+                  ) : (
+                    favorites.map((favorite) => (
+                      <option key={favorite.id} value={favorite.id}>
+                        {favorite.name} ({favorite.condition_count} 条)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="field wide">
+                <span>信号池名称</span>
+                <input
+                  placeholder={selectedFavorite ? `${selectedFavorite.name} 信号池` : "可不填，系统自动命名"}
+                  value={form.signalSetName}
+                  onChange={(event) => updateForm("signalSetName", event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>开始日期</span>
+                <input type="date" value={form.startDate} onChange={(event) => updateForm("startDate", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>结束日期</span>
+                <input type="date" value={form.endDate} onChange={(event) => updateForm("endDate", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>信号周期</span>
+                <select value={form.signalTimeframe} onChange={(event) => changeSignalTimeframe(event.target.value)}>
+                  {backtestSignalTimeframeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>信号频率</span>
+                <select value={form.signalMode} onChange={(event) => changeSignalMode(event.target.value)}>
+                  {backtestSignalModeOptions.map((option) => (
+                    <option
+                      disabled={signalModeDisabled && option.value === "each_bar_close"}
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
                     </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="backtest-form-actions">
+              <p className="backtest-hint">
+                防未来函数：收藏条件只看到当前信号K线收盘前的数据，信号在下一根K线开始时才确认。
+              </p>
+              <button className="primary-action" disabled={generatingSignalSet || loadingFavorites} type="submit">
+                {generatingSignalSet ? "生成中..." : "生成信号池"}
+              </button>
+            </div>
+          </form>
+
+          <form
+            className="backtest-card backtest-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void startBacktest();
+            }}
+          >
+            <div className="backtest-card-head">
+              <span className="eyebrow">Step 2</span>
+              <strong>入场与出场规则</strong>
+              <em>默认复刻 v001 泵后回落做空</em>
+            </div>
+            <div className="backtest-form-grid">
+              <label className="field wide">
+                <span>信号池</span>
+                <select value={form.signalSetId} onChange={(event) => updateForm("signalSetId", event.target.value)}>
+                  {signalSets.length === 0 ? (
+                    <option value="">暂无信号池</option>
+                  ) : (
+                    signalSets.map((signalSet) => (
+                      <option key={signalSet.id} value={signalSet.id}>
+                        {signalSet.name} ({signalSet.summary?.event_count ?? 0} 个信号)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="field wide">
+                <span>回测名称</span>
+                <input
+                  placeholder={selectedSignalSet ? `${selectedSignalSet.name} 回测` : "可不填，系统自动命名"}
+                  value={form.backtestName}
+                  onChange={(event) => updateForm("backtestName", event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>方向</span>
+                <select value={form.side} onChange={(event) => updateForm("side", event.target.value)}>
+                  <option value="short">做空</option>
+                  <option value="long">做多</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>成交K线</span>
+                <select value={form.entryTimeframe} onChange={(event) => updateForm("entryTimeframe", event.target.value)}>
+                  {backtestEntryTimeframeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field wide">
+                <span>入场规则</span>
+                <select value={form.entryRule} onChange={(event) => updateForm("entryRule", event.target.value)}>
+                  <option value="consecutive_green_bars">信号后连续N根阳线，再下一根开盘</option>
+                  <option value="next_bar_open">信号确认后下一根开盘</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>入场窗口分钟</span>
+                <input min="1" type="number" value={form.entryWindowMinutes} onChange={(event) => updateForm("entryWindowMinutes", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>连续阳线根数</span>
+                <input min="1" max="20" type="number" value={form.entryConsecutiveBars} onChange={(event) => updateForm("entryConsecutiveBars", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>单根涨幅%</span>
+                <input min="0" step="0.1" type="number" value={form.entryMinGainPctEach} onChange={(event) => updateForm("entryMinGainPctEach", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>持仓分钟</span>
+                <input min="1" type="number" value={form.exitHoldMinutes} onChange={(event) => updateForm("exitHoldMinutes", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>止损%</span>
+                <input min="0" step="0.1" type="number" value={form.stopLossPct} onChange={(event) => updateForm("stopLossPct", event.target.value)} />
+              </label>
+              <label className="field wide">
+                <span>止损模型</span>
+                <select value={form.stopModel} onChange={(event) => updateForm("stopModel", event.target.value)}>
+                  <option value="bot_like_checkpoint">检查点止损（贴近旧bot）</option>
+                  <option value="hard_stop_intrabar">盘中硬止损</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>单笔保证金U</span>
+                <input min="1" type="number" value={form.positionUsdt} onChange={(event) => updateForm("positionUsdt", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>杠杆</span>
+                <input min="0.01" step="0.1" type="number" value={form.leverage} onChange={(event) => updateForm("leverage", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>最多持仓</span>
+                <input min="1" max="100" type="number" value={form.maxPositions} onChange={(event) => updateForm("maxPositions", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>手续费bps</span>
+                <input min="0" step="0.1" type="number" value={form.feeBps} onChange={(event) => updateForm("feeBps", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>滑点bps</span>
+                <input min="0" step="0.1" type="number" value={form.slippageBps} onChange={(event) => updateForm("slippageBps", event.target.value)} />
+              </label>
+            </div>
+            <div className="backtest-form-actions">
+              <p className="backtest-hint">
+                v001 默认：1H候选后60分钟内，5m连续2根阳线且单根≥2%，下一根开盘做空，持仓440分钟，15%止损。
+              </p>
+              <button className="primary-action" disabled={running || !form.signalSetId} type="submit">
+                {running ? "回测中..." : "开始规则回测"}
+              </button>
+            </div>
+          </form>
+
+          {selectedSignalSet && (
+            <div className="backtest-card signal-set-preview">
+              <div className="backtest-card-head">
+                <span className="eyebrow">Signal Pool</span>
+                <strong>{selectedSignalSet.name}</strong>
+                <em>{runStatusLabel(selectedSignalSet.status)} · {formatDateTime(selectedSignalSet.created_at)}</em>
+              </div>
+              <div className="signal-set-stats">
+                <span>信号 <b>{selectedSignalSummary?.event_count ?? 0}</b></span>
+                <span>唯一合约 <b>{selectedSignalSummary?.unique_contracts ?? 0}</b></span>
+                <span>检查点 <b>{selectedSignalSummary?.checkpoint_count ?? 0}</b></span>
+                <span>区间 <b>{selectedSignalSummary?.start_date ?? "--"} ~ {selectedSignalSummary?.end_date ?? "--"}</b></span>
+                <span>首个确认 <b>{selectedSignalSummary?.first_confirm_time ?? "--"}</b></span>
+                <span>最后确认 <b>{selectedSignalSummary?.last_confirm_time ?? "--"}</b></span>
+              </div>
+              <div className="signal-event-list">
+                {loadingEvents ? (
+                  <span>加载信号明细...</span>
+                ) : signalEvents.length === 0 ? (
+                  <span>这个信号池还没有命中的信号。</span>
+                ) : (
+                  signalEvents.slice(0, 12).map((event) => (
+                    <span key={event.id}>
+                      <b>{event.inst_id}</b> · {event.confirm_time} · 强度 {formatOptionalNumber(event.strength)}
+                    </span>
                   ))
                 )}
-              </select>
-            </label>
-            <label className="field wide">
-              <span>回测名称</span>
-              <input
-                placeholder={selectedFavorite ? `${selectedFavorite.name} 回测` : "可不填，系统自动命名"}
-                value={form.name}
-                onChange={(event) => updateForm("name", event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>开始日期</span>
-              <input type="date" value={form.startDate} onChange={(event) => updateForm("startDate", event.target.value)} />
-            </label>
-            <label className="field">
-              <span>结束日期</span>
-              <input type="date" value={form.endDate} onChange={(event) => updateForm("endDate", event.target.value)} />
-            </label>
-            <label className="field">
-              <span>信号周期</span>
-              <select value={form.signalTimeframe} onChange={(event) => changeSignalTimeframe(event.target.value)}>
-                {backtestSignalTimeframeOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>信号频率</span>
-              <select value={form.signalMode} onChange={(event) => changeSignalMode(event.target.value)}>
-                {backtestSignalModeOptions.map((option) => (
-                  <option
-                    disabled={signalModeDisabled && option.value === "each_bar_close"}
-                    key={option.value}
-                    value={option.value}
-                  >
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>成交K线</span>
-              <select value={form.entryTimeframe} onChange={(event) => updateForm("entryTimeframe", event.target.value)}>
-                {backtestEntryTimeframeOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>持仓小时</span>
-              <input min="1" max="720" type="number" value={form.holdHours} onChange={(event) => updateForm("holdHours", event.target.value)} />
-            </label>
-            <label className="field">
-              <span>单笔U</span>
-              <input min="1" type="number" value={form.positionUsdt} onChange={(event) => updateForm("positionUsdt", event.target.value)} />
-            </label>
-            <label className="field">
-              <span>最多持仓</span>
-              <input min="1" max="100" type="number" value={form.maxPositions} onChange={(event) => updateForm("maxPositions", event.target.value)} />
-            </label>
-            <label className="field">
-              <span>手续费bps</span>
-              <input min="0" step="0.1" type="number" value={form.feeBps} onChange={(event) => updateForm("feeBps", event.target.value)} />
-            </label>
-            <label className="field">
-              <span>滑点bps</span>
-              <input min="0" step="0.1" type="number" value={form.slippageBps} onChange={(event) => updateForm("slippageBps", event.target.value)} />
-            </label>
-          </div>
-          <p className="backtest-hint">
-            防未来函数：信号在当前K线收盘后才生效，成交价使用下一根 {timeframeLabels[form.entryTimeframe] ?? form.entryTimeframe} K线开盘价。
-          </p>
-        </form>
-
-        <aside className="backtest-card backtest-runs">
-          <div className="backtest-card-head">
-            <span className="eyebrow">SQLite Runs</span>
-            <strong>最近回测</strong>
-          </div>
-          {runs.length === 0 ? (
-            <EmptyState title="暂无回测记录" text="点击开始回测后，会把结果写入本地 SQLite。" />
-          ) : (
-            <div className="backtest-run-list">
-              {runs.map((run) => (
-                <button
-                  className={activeRun?.id === run.id ? "active" : ""}
-                  disabled={loadingRun}
-                  key={run.id}
-                  onClick={() => void openRun(run.id)}
-                >
-                  <strong>{run.name}</strong>
-                  <span>{runStatusLabel(run.status)} · {formatDateTime(run.created_at)}</span>
-                  {run.result?.summary && (
-                    <em className={numberTone(run.result.summary.total_pnl)}>
-                      {formatSignedNumber(run.result.summary.total_pnl)}U / {formatPercent(run.result.summary.total_return_pct)}
-                    </em>
-                  )}
-                </button>
-              ))}
+              </div>
             </div>
           )}
+        </div>
+
+        <aside className="backtest-side-stack">
+          <div className="backtest-card backtest-runs">
+            <div className="backtest-card-head">
+              <span className="eyebrow">SQLite Signals</span>
+              <strong>最近信号池</strong>
+            </div>
+            {signalSets.length === 0 ? (
+              <EmptyState title="暂无信号池" text="先用收藏条件生成候选信号池。" />
+            ) : (
+              <div className="backtest-run-list signal-set-list">
+                {signalSets.map((signalSet) => (
+                  <button
+                    className={form.signalSetId === signalSet.id ? "active" : ""}
+                    disabled={loadingSignalSets}
+                    key={signalSet.id}
+                    onClick={() => updateForm("signalSetId", signalSet.id)}
+                  >
+                    <strong>{signalSet.name}</strong>
+                    <span>{runStatusLabel(signalSet.status)} · {formatDateTime(signalSet.created_at)}</span>
+                    <em>{signalSet.summary?.event_count ?? 0} 信号 / {signalSet.summary?.unique_contracts ?? 0} 合约</em>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="backtest-card backtest-runs">
+            <div className="backtest-card-head">
+              <span className="eyebrow">SQLite Runs</span>
+              <strong>最近回测</strong>
+            </div>
+            {runs.length === 0 ? (
+              <EmptyState title="暂无回测记录" text="点击开始回测后，会把结果写入本地 SQLite。" />
+            ) : (
+              <div className="backtest-run-list">
+                {runs.map((run) => (
+                  <button
+                    className={activeRun?.id === run.id ? "active" : ""}
+                    disabled={loadingRun}
+                    key={run.id}
+                    onClick={() => void openRun(run.id)}
+                  >
+                    <strong>{run.name}</strong>
+                    <span>{runStatusLabel(run.status)} · {formatDateTime(run.created_at)}</span>
+                    {run.result?.summary && (
+                      <em className={numberTone(run.result.summary.total_pnl)}>
+                        {formatSignedNumber(run.result.summary.total_pnl)}U / {formatPercent(run.result.summary.total_return_pct)}
+                      </em>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </aside>
       </div>
 
       {error && <div className="inline-error backtest-error">{error}</div>}
-      {running && <EmptyState title="正在回测" text="逐个检查信号点，脚本指标会按日期缓存；区间过大时可能需要几十秒。" />}
+      {generatingSignalSet && <EmptyState title="正在生成信号池" text="逐个检查收藏条件命中，脚本指标会按日期缓存。" />}
+      {running && <EmptyState title="正在回测" text="先从信号池寻找入场，再按止损和到期规则模拟出场。" />}
 
       {summaryStats && (
         <>
@@ -1459,8 +1715,10 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 <span>开仓 <b>{summaryStats.opened_trades}</b></span>
                 <span>重叠跳过 <b>{summaryStats.skipped_overlap}</b></span>
                 <span>满仓跳过 <b>{summaryStats.skipped_max_positions}</b></span>
-                <span>无入场K <b>{summaryStats.skipped_no_entry}</b></span>
-                <span>无出场K <b>{summaryStats.skipped_no_exit}</b></span>
+                <span>无入场 <b>{summaryStats.skipped_no_entry}</b></span>
+                <span>无出场 <b>{summaryStats.skipped_no_exit}</b></span>
+                <span>方向 <b>{summaryStats.side === "short" ? "做空" : summaryStats.side === "long" ? "做多" : "--"}</b></span>
+                <span>持仓 <b>{summaryStats.exit_hold_minutes ?? Math.round(summaryStats.hold_hours * 60)}分钟</b></span>
                 <span>Profit Factor <b>{summaryStats.profit_factor ?? "--"}</b></span>
                 <span>耗时 <b>{summaryStats.duration_ms}ms</b></span>
               </div>
@@ -1479,11 +1737,13 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                   <tr>
                     <th>#</th>
                     <th>合约</th>
-                    <th>信号时间</th>
+                    <th>方向</th>
+                    <th>信号确认</th>
                     <th>入场</th>
                     <th>出场</th>
                     <th>入场价</th>
                     <th>出场价</th>
+                    <th>出场原因</th>
                     <th>收益</th>
                     <th>盈亏U</th>
                   </tr>
@@ -1504,18 +1764,20 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                           </button>
                         </span>
                       </td>
-                      <td>{trade.signal_time}</td>
+                      <td>{trade.direction ?? (trade.side === "short" ? "做空" : "做多")}</td>
+                      <td>{trade.confirm_time ?? trade.signal_time}</td>
                       <td>{trade.entry_time}</td>
                       <td>{trade.exit_time}</td>
                       <td>{formatOptionalNumber(trade.entry_price)}</td>
                       <td>{formatOptionalNumber(trade.exit_price)}</td>
+                      <td>{trade.exit_reason ?? "--"}</td>
                       <td className={numberTone(trade.net_return_pct)}>{formatPercent(trade.net_return_pct)}</td>
                       <td className={numberTone(trade.pnl_usdt)}>{formatSignedNumber(trade.pnl_usdt)}</td>
                     </tr>
                   ))}
                   {trades.length === 0 && (
                     <tr>
-                      <td colSpan={9}>本次回测没有产生可成交交易。</td>
+                      <td colSpan={11}>本次回测没有产生可成交交易。</td>
                     </tr>
                   )}
                 </tbody>
@@ -3845,19 +4107,20 @@ function defaultRunDate(summary: DataSummary | null, period: string) {
 }
 
 function tradeKlineMarkers(trade: BacktestTrade): KlineTradeMarker[] {
+  const isShort = trade.side === "short";
   return [
     {
-      side: "buy",
+      side: isShort ? "sell" : "buy",
       ts: trade.entry_ts,
       price: trade.entry_price,
-      label: "买",
+      label: isShort ? "卖开" : "买入",
       time: trade.entry_time,
     },
     {
-      side: "sell",
+      side: isShort ? "buy" : "sell",
       ts: trade.exit_ts,
       price: trade.exit_price,
-      label: "卖",
+      label: isShort ? "买平" : "卖出",
       time: trade.exit_time,
     },
   ];
@@ -3905,7 +4168,13 @@ function suggestedBacktestRange(summary: DataSummary | null, period: string, mod
   if (rows.length === 0) return { start: end, end };
   const endIndex = rows.findIndex((item) => item.date === end);
   const fallbackEndIndex = endIndex >= 0 ? endIndex : rows.length - 1;
-  const span = mode === "each_bar_close" ? 14 : 180;
+  const span = mode === "each_bar_close"
+    ? period === "1m"
+      ? 1
+      : period === "5m"
+        ? 1
+        : 14
+    : 180;
   const startIndex = Math.max(0, fallbackEndIndex - span + 1);
   return {
     start: rows[startIndex]?.date ?? end,

@@ -315,6 +315,11 @@ def _match_metadata_filters(
                 inst_id,
                 condition_as_of_ts,
             )
+            if source_row is not None and condition.get("match_current_bar"):
+                source_ts = _to_int(source_row.get("ts"))
+                target_ts = condition_as_of_ts if condition_as_of_ts is not None else as_of_ts
+                if target_ts is not None and source_ts != target_ts:
+                    source_row = None
             if source_row is None:
                 if value_mode == "any":
                     pass
@@ -326,6 +331,9 @@ def _match_metadata_filters(
                     all_passed = False
                 continue
             raw_value = source_row.get("value", "") or ""
+            source_ts = source_row.get("ts", "") or ""
+            if source_ts:
+                values[f"{indicator_id}::ts"] = source_ts
         else:
             raw_field = indicator.get("raw_field")
             if not raw_field:

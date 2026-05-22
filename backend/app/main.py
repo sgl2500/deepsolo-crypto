@@ -13,6 +13,7 @@ from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
 from .indicator_repository import IndicatorCreate, indicator_repository
 from .screener import builtin_indicators, query_screener
+from .signal_pool_service import signal_pool_service
 from . import contract_update_service, script_indicator_service
 
 app = FastAPI(title="Crypto Screener Local API", version="0.1.0")
@@ -70,6 +71,35 @@ class BacktestRunRequest(BaseModel):
     fee_bps_per_side: float = Field(default=5, ge=0)
     slippage_bps_per_side: float = Field(default=5, ge=0)
     checkpoint_limit: int = Field(default=500, ge=1, le=5000)
+
+
+class SignalSetCreateRequest(BaseModel):
+    favorite_id: str = Field(min_length=1)
+    name: str = ""
+    start_date: str
+    end_date: str
+    signal_timeframe: str = "1H"
+    signal_mode: str = "daily"
+    checkpoint_limit: int = Field(default=500, ge=1, le=5000)
+
+
+class SignalSetBacktestRequest(BaseModel):
+    signal_set_id: str = Field(min_length=1)
+    name: str = ""
+    side: str = "short"
+    entry_timeframe: str = "5m"
+    entry_rule: str = "consecutive_green_bars"
+    entry_window_minutes: int = Field(default=60, ge=1, le=1440)
+    entry_consecutive_bars: int = Field(default=2, ge=1, le=20)
+    entry_min_gain_pct_each: float = Field(default=2.0, ge=0)
+    exit_hold_minutes: int = Field(default=440, ge=1, le=43200)
+    stop_loss_pct: float = Field(default=15.0, ge=0)
+    stop_model: str = "bot_like_checkpoint"
+    position_usdt: float = Field(default=500, gt=0)
+    leverage: float = Field(default=1, gt=0)
+    max_positions: int = Field(default=2, ge=1, le=100)
+    fee_bps_per_side: float = Field(default=5, ge=0)
+    slippage_bps_per_side: float = Field(default=5, ge=0)
 
 app.add_middleware(
     CORSMiddleware,
@@ -376,9 +406,57 @@ def delete_screener_favorite(favorite_id: str) -> dict:
     return {"deleted": deleted}
 
 
+@app.get("/api/signal-sets")
+def signal_sets() -> dict:
+    return {"items": signal_pool_service.list_signal_sets()}
+
+
+@app.post("/api/signal-sets", status_code=201)
+def create_signal_set(payload: SignalSetCreateRequest) -> dict:
+    try:
+        return signal_pool_service.create_signal_set(payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/signal-sets/{signal_set_id}")
+def signal_set(signal_set_id: str) -> dict:
+    item = signal_pool_service.get_signal_set(signal_set_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"信号池不存在：{signal_set_id}")
+    return item
+
+
+@app.get("/api/signal-sets/{signal_set_id}/events")
+def signal_set_events(
+    signal_set_id: str,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict:
+    try:
+        return {"items": signal_pool_service.list_events(signal_set_id, limit=limit)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/backtests/runs")
 def backtest_runs() -> dict:
     return {"items": backtest_service.list_runs()}
+
+
+@app.post("/api/backtests/runs/from-signal-set", status_code=201)
+def create_backtest_run_from_signal_set(payload: SignalSetBacktestRequest) -> dict:
+    try:
+        return signal_pool_service.create_backtest_from_signal_set(payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/backtests/runs/{run_id}")

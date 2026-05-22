@@ -4048,6 +4048,13 @@ tbody tr:hover {
   box-shadow: 0 10px 28px rgba(6, 23, 36, 0.06);
 }
 
+.backtest-main-stack,
+.backtest-side-stack {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
 .backtest-card-head {
   display: flex;
   gap: 10px;
@@ -4111,6 +4118,69 @@ tbody tr:hover {
   color: #526071;
   font-size: 13px;
   line-height: 1.7;
+}
+
+.backtest-form-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+}
+
+.backtest-form-actions .backtest-hint {
+  margin: 0;
+}
+
+.signal-set-preview {
+  border-color: #d4eadf;
+  background:
+    linear-gradient(135deg, rgba(9, 182, 162, 0.09), rgba(255, 255, 255, 0.92) 44%),
+    #ffffff;
+}
+
+.signal-set-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.signal-set-stats span {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  color: #667085;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #deeee9;
+  border-radius: 10px;
+}
+
+.signal-set-stats b {
+  overflow: hidden;
+  color: #172033;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signal-event-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.signal-event-list span {
+  padding: 7px 9px;
+  color: #526071;
+  font-size: 12px;
+  background: #f8fbff;
+  border: 1px solid #e1edf7;
+  border-radius: 999px;
+}
+
+.signal-event-list b {
+  color: #172033;
 }
 
 .backtest-runs {
@@ -4346,6 +4416,15 @@ tbody tr:hover {
 
   .backtest-form .field.wide {
     grid-column: span 1;
+  }
+
+  .backtest-form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .signal-set-stats {
+    grid-template-columns: 1fr;
   }
 
   .backtest-table-card,

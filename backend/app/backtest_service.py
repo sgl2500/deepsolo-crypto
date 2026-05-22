@@ -564,6 +564,7 @@ def _favorite_metadata_filters(favorite: dict[str, Any]) -> list[dict[str, Any]]
                 "external_relation": bool(condition.get("external_relation")),
                 "time_range": bool(condition.get("time_range")),
                 "exclude": bool(condition.get("exclude")),
+                "match_current_bar": bool(condition.get("match_current_bar")),
             }
         )
     return filters

@@ -368,6 +368,7 @@ export type ScreenerFavoriteCondition = {
   external_relation: boolean;
   time_range: boolean;
   exclude: boolean;
+  match_current_bar?: boolean;
 };
 
 export type ScreenerFavoritePayload = {
@@ -389,6 +390,75 @@ export type ScreenerFavorite = ScreenerFavoritePayload & {
   condition_count: number;
 };
 
+export type SignalSetCreateRequest = {
+  favorite_id: string;
+  name?: string;
+  start_date: string;
+  end_date: string;
+  signal_timeframe: string;
+  signal_mode: "daily" | "each_bar_close";
+  checkpoint_limit?: number;
+};
+
+export type SignalSetSummary = {
+  start_date?: string;
+  end_date?: string;
+  signal_timeframe?: string;
+  signal_mode?: string;
+  checkpoint_count?: number;
+  matched_count?: number;
+  returned_count?: number;
+  event_count?: number;
+  truncated_events?: number;
+  unique_contracts?: number;
+  total_contracts?: number;
+  first_signal_ts?: number | null;
+  first_signal_time?: string | null;
+  last_signal_ts?: number | null;
+  last_signal_time?: string | null;
+  first_confirm_ts?: number | null;
+  first_confirm_time?: string | null;
+  last_confirm_ts?: number | null;
+  last_confirm_time?: string | null;
+  duration_ms?: number;
+};
+
+export type SignalSet = {
+  id: string;
+  favorite_id: string;
+  name: string;
+  status: "running" | "completed" | "failed" | string;
+  config: SignalSetCreateRequest;
+  favorite: {
+    id: string;
+    name: string;
+    timeframe: string;
+    condition_count: number;
+  };
+  summary: SignalSetSummary;
+  error: string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+};
+
+export type SignalEvent = {
+  id: string;
+  signal_set_id: string;
+  favorite_id: string;
+  inst_id: string;
+  timeframe: string;
+  date: string;
+  signal_ts: number;
+  confirm_ts: number;
+  signal_time: string | null;
+  confirm_time: string | null;
+  strength: number;
+  matched_conditions: string[];
+  metadata_values: Record<string, string>;
+  row_snapshot: Record<string, unknown>;
+};
+
 export type BacktestRunRequest = {
   favorite_id: string;
   name?: string;
@@ -405,7 +475,26 @@ export type BacktestRunRequest = {
   checkpoint_limit?: number;
 };
 
-export type BacktestRunConfig = BacktestRunRequest & {
+export type SignalSetBacktestRequest = {
+  signal_set_id: string;
+  name?: string;
+  side: "long" | "short";
+  entry_timeframe: string;
+  entry_rule: "next_bar_open" | "consecutive_green_bars";
+  entry_window_minutes: number;
+  entry_consecutive_bars: number;
+  entry_min_gain_pct_each: number;
+  exit_hold_minutes: number;
+  stop_loss_pct: number;
+  stop_model: "bot_like_checkpoint" | "hard_stop_intrabar";
+  position_usdt: number;
+  leverage: number;
+  max_positions: number;
+  fee_bps_per_side: number;
+  slippage_bps_per_side: number;
+};
+
+export type BacktestRunConfig = Partial<BacktestRunRequest & SignalSetBacktestRequest> & {
   favorite_name?: string;
 };
 
@@ -422,7 +511,12 @@ export type BacktestSummary = {
   signal_mode: string;
   signal_timeframe: string;
   entry_timeframe: string;
+  entry_rule?: string;
+  side?: string;
   hold_hours: number;
+  exit_hold_minutes?: number;
+  stop_loss_pct?: number;
+  stop_model?: string;
   initial_capital: number;
   total_trades: number;
   win_trades: number;
@@ -436,6 +530,9 @@ export type BacktestSummary = {
   fee_bps_per_side: number;
   slippage_bps_per_side: number;
   duration_ms: number;
+  skipped_entry_rule?: number;
+  position_usdt?: number;
+  leverage?: number;
 };
 
 export type BacktestEquityPoint = {
@@ -449,9 +546,13 @@ export type BacktestEquityPoint = {
 export type BacktestTrade = {
   id: number;
   inst_id: string;
+  side?: "long" | "short" | string;
+  direction?: string;
   signal_date: string;
   signal_ts: number;
   signal_time: string;
+  confirm_ts?: number;
+  confirm_time?: string;
   entry_ts: number;
   entry_time: string;
   exit_ts: number;
@@ -462,9 +563,21 @@ export type BacktestTrade = {
   raw_exit_price: number;
   entry_price: number;
   exit_price: number;
+  stop_price?: number;
+  exit_reason?: string;
+  entry_reason?: string;
+  trigger_pct?: number[];
+  delay_min?: number;
+  exit_hold_minutes?: number;
+  leverage?: number;
+  notional_usdt?: number;
   gross_return_pct: number;
   net_return_pct: number;
   fee_usdt: number;
+  slippage_usdt?: number;
+  cost_usdt?: number;
+  max_adverse_pct?: number;
+  max_favorable_pct?: number;
   pnl_usdt: number;
   matched_conditions: string[];
   signal_metrics: Record<string, number | string | null | undefined>;
@@ -492,6 +605,11 @@ export type BacktestResult = {
     name: string;
     timeframe: string;
     condition_count: number;
+  };
+  signal_set?: {
+    id: string;
+    name: string;
+    summary: SignalSetSummary;
   };
 };
 
@@ -727,6 +845,33 @@ export async function deleteScreenerFavorite(favoriteId: string): Promise<{ dele
   });
 }
 
+export async function fetchSignalSets(): Promise<{ items: SignalSet[] }> {
+  return request("/api/signal-sets");
+}
+
+export async function fetchSignalSet(signalSetId: string): Promise<SignalSet> {
+  return request(`/api/signal-sets/${encodeURIComponent(signalSetId)}`);
+}
+
+export async function fetchSignalSetEvents(signalSetId: string, limit = 500): Promise<{ items: SignalEvent[] }> {
+  return request(`/api/signal-sets/${encodeURIComponent(signalSetId)}/events?limit=${limit}`);
+}
+
+export async function createSignalSet(payload: SignalSetCreateRequest): Promise<SignalSet> {
+  return request(
+    "/api/signal-sets",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    {
+      timeoutMs: 120_000,
+      timeoutMessage: "信号池生成超时：超过 120 秒还没有返回，请缩短区间或改为每日一次信号。",
+    },
+  );
+}
+
 export async function fetchBacktestRuns(): Promise<{ items: BacktestRun[] }> {
   return request("/api/backtests/runs");
 }
@@ -746,6 +891,21 @@ export async function createBacktestRun(payload: BacktestRunRequest): Promise<Ba
     {
       timeoutMs: 120_000,
       timeoutMessage: "回测请求超时：超过 120 秒还没有返回，请缩短日期区间或改成每日一次信号。",
+    },
+  );
+}
+
+export async function createBacktestRunFromSignalSet(payload: SignalSetBacktestRequest): Promise<BacktestRun> {
+  return request(
+    "/api/backtests/runs/from-signal-set",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    {
+      timeoutMs: 120_000,
+      timeoutMessage: "基于信号池的回测请求超时：超过 120 秒还没有返回，请缩短信号池区间或降低信号数量。",
     },
   );
 }
