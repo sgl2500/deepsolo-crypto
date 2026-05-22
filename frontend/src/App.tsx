@@ -102,7 +102,11 @@ type MetadataConditionDraft = {
   indicatorId: string;
   timeMode: string;
   timeOffset: string;
+  timePointMode: string;
   timePoint: string;
+  barOffset: string;
+  timeOffsetValue: string;
+  timeOffsetUnit: string;
   operator: string;
   value: string;
   truncateMode: string;
@@ -155,7 +159,7 @@ export default function App() {
   const [conditionModalOpen, setConditionModalOpen] = useState(false);
   const [editingCondition, setEditingCondition] = useState<MetadataCondition | null>(null);
   const [tableSearch, setTableSearch] = useState("");
-  const [asOfTime, setAsOfTime] = useState("");
+  const [asOfTime, setAsOfTime] = useState("00:00");
   const [loading, setLoading] = useState(true);
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -178,6 +182,10 @@ export default function App() {
   }, [summary, timeframe, date]);
 
   useEffect(() => {
+    setAsOfTime((current) => normalizeBaselineTimeForPeriod(timeframe, current));
+  }, [timeframe]);
+
+  useEffect(() => {
     if (date && metadataConditions.length > 0) {
       void runQuery();
     } else {
@@ -191,9 +199,12 @@ export default function App() {
   const dates = useMemo(() => tfSummary?.dates.slice().reverse() ?? [], [tfSummary]);
   const rows = result?.rows ?? [];
   const queryTimedOut = isTimeoutMessage(error);
+  const normalizedAsOfTime = normalizeBaselineTimeForPeriod(timeframe, asOfTime);
+  const asOfTimeError = metadataTimePointError(timeframe, normalizedAsOfTime);
+  const asOfDisplayLabel = result?.as_of_label ?? (date ? `${date} ${normalizedAsOfTime}` : "--");
   const valueConditions = useMemo(
-    () => uniqueValueConditions(metadataConditions, date, dates),
-    [metadataConditions, date, dates],
+    () => uniqueValueConditions(metadataConditions, date, dates, normalizedAsOfTime),
+    [metadataConditions, date, dates, normalizedAsOfTime],
   );
   const visibleRows = useMemo(() => {
     const needle = tableSearch.trim().toLowerCase();
@@ -227,7 +238,7 @@ export default function App() {
             <span className="pro-symbol-cell">{value}</span>
             <button
               className="kline-icon-button"
-              title="查看基准日前后各33根K线"
+              title="查看基准时间前后各33根K线"
               onClick={(event) => {
                 event.stopPropagation();
                 void openKlineWindow(row);
@@ -239,12 +250,12 @@ export default function App() {
         ),
       },
       ...valueConditions.map((condition) => {
-        const columnValueKey = valueConditionKey(condition, date, dates);
+        const columnValueKey = valueConditionKey(condition, date, dates, normalizedAsOfTime);
         return {
           title: (
             <TableColumnHead
               title={condition.indicator.name_zh}
-              subtitle={conditionTimeSubtitle(condition, date, dates)}
+              subtitle={conditionTimeSubtitle(condition, date, dates, normalizedAsOfTime)}
               sortable
             />
           ),
@@ -257,7 +268,7 @@ export default function App() {
         };
       }),
     ],
-    [date, dates, valueConditions, timeframe],
+    [normalizedAsOfTime, date, dates, valueConditions, timeframe],
   );
   const selectedDateIndex = dates.findIndex((item) => item.date === date);
   const previousDate = selectedDateIndex >= 0 ? dates[selectedDateIndex + 1] : undefined;
@@ -307,10 +318,10 @@ export default function App() {
     setFavoriteNotice(null);
     try {
       const favorite = await createScreenerFavorite({
-        name: favoriteName(metadataConditions, date),
+        name: favoriteName(metadataConditions, date, normalizedAsOfTime),
         timeframe,
         date: date || null,
-        as_of_time: asOfTime,
+        as_of_time: normalizedAsOfTime,
         min_ret_15m: minRet15m,
         min_vol_ratio_60: minVolRatio60,
         min_vol_quote_15m: minVolQuote15m,
@@ -333,7 +344,7 @@ export default function App() {
       .filter((condition): condition is MetadataCondition => Boolean(condition));
     setTimeframe(favorite.timeframe || timeframe);
     if (favorite.date) setDate(favorite.date);
-    setAsOfTime(favorite.as_of_time ?? "");
+    setAsOfTime(normalizeBaselineTimeForPeriod(favorite.timeframe || timeframe, favorite.as_of_time ?? "00:00"));
     setMinRet15m(favorite.min_ret_15m ?? "");
     setMinVolRatio60(favorite.min_vol_ratio_60 ?? "");
     setMinVolQuote15m(favorite.min_vol_quote_15m ?? "");
@@ -356,7 +367,7 @@ export default function App() {
 
   async function openKlineWindow(row: ScreenerTableRow) {
     if (!date) {
-      setKlineError("请先选择基准日期。");
+      setKlineError("请先选择基准时间。");
       return;
     }
     const target = { instId: row.inst_id, anchorTs: row.latest_ts };
@@ -402,6 +413,13 @@ export default function App() {
       setResult(null);
       return;
     }
+    if (asOfTimeError) {
+      queryRunRef.current += 1;
+      setQuerying(false);
+      setResult(null);
+      setError(asOfTimeError);
+      return;
+    }
     const runId = queryRunRef.current + 1;
     queryRunRef.current = runId;
     setQuerying(true);
@@ -411,7 +429,7 @@ export default function App() {
       const data = await queryScreener({
         timeframe,
         date,
-        asOf: date && asOfTime ? `${date}T${asOfTime}:00` : undefined,
+        asOf: date ? `${date}T${normalizedAsOfTime}:00` : undefined,
         minRet15m,
         minVolRatio60,
         minVolQuote15m,
@@ -559,6 +577,20 @@ export default function App() {
                   )}
                   <button disabled={!nextDate} onClick={() => nextDate && setDate(nextDate.date)}>›</button>
                 </div>
+                <div className="asof-time-control">
+                  <label htmlFor="screener-asof-time">选币基准时间</label>
+                  <div className="asof-time-input-row">
+                    <BaselineTimePicker
+                      id="screener-asof-time"
+                      value={normalizedAsOfTime}
+                      timeframe={timeframe}
+                      onChange={setAsOfTime}
+                    />
+                  </div>
+                  <small className={asOfTimeError ? "error" : ""}>
+                    {asOfTimeError || (result?.as_of_label ? `实际使用 ${result.as_of_label}` : `将使用 ${date || "--"} ${normalizedAsOfTime}`)}
+                  </small>
+                </div>
               </div>
 
               <section className="terminal-table-panel focused-table-panel">
@@ -611,7 +643,7 @@ export default function App() {
                   </ConfigProvider>
                 )}
                 <div className="terminal-table-footer focused-footer">
-                  <span>数据基准日期 <b>{formatDateBadge(date) || "--"}</b></span>
+                  <span>选币基准时间 <b>{asOfDisplayLabel}</b></span>
                   <span>共{visibleRows.length}条</span>
                 </div>
               </section>
@@ -689,6 +721,90 @@ function TableColumnHead({
         {subtitle && <span>{subtitle}</span>}
       </div>
       {sortable && <i aria-hidden="true" />}
+    </div>
+  );
+}
+
+function BaselineTimePicker({
+  id,
+  value,
+  timeframe,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  timeframe: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const normalized = normalizeBaselineTimeForPeriod(timeframe, value);
+  const [hour, minute] = baselineTimeParts(normalized);
+  const hourOptions = metadataPeriodAllowsTime(timeframe) ? Array.from({ length: 24 }, (_, index) => index) : [0];
+  const minuteOptions = baselineMinuteOptions(timeframe);
+  const minuteLocked = minuteOptions.length <= 1;
+
+  useEffect(() => {
+    function closeOnOutside(event: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    if (open) document.addEventListener("mousedown", closeOnOutside);
+    return () => document.removeEventListener("mousedown", closeOnOutside);
+  }, [open]);
+
+  function pick(nextHour: number, nextMinute: number) {
+    const alignedMinute = minuteOptions.includes(nextMinute) ? nextMinute : minuteOptions[0] ?? 0;
+    onChange(formatTimeParts(nextHour, alignedMinute));
+  }
+
+  return (
+    <div className="baseline-time-picker" ref={rootRef}>
+      <button
+        id={id}
+        type="button"
+        className="baseline-time-trigger"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{normalized}</span>
+        <em>滚动选择</em>
+      </button>
+      {open && (
+        <div className="baseline-time-popover">
+          <div className="time-wheel-column">
+            <strong>时</strong>
+            <div className="time-wheel-list">
+              {hourOptions.map((item) => (
+                <button
+                  type="button"
+                  key={item}
+                  className={item === hour ? "active" : ""}
+                  onClick={() => pick(item, minute)}
+                >
+                  {String(item).padStart(2, "0")}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className={minuteLocked ? "time-wheel-column locked" : "time-wheel-column"}>
+            <strong>分</strong>
+            <div className="time-wheel-list">
+              {minuteOptions.map((item) => (
+                <button
+                  type="button"
+                  key={item}
+                  className={item === minute ? "active" : ""}
+                  disabled={minuteLocked}
+                  onClick={() => pick(hour, item)}
+                >
+                  {String(item).padStart(2, "0")}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -792,7 +908,7 @@ function ScreenerFavoritesModal({
                   </div>
                   <div className="favorite-card-meta">
                     <span>{favorite.condition_count} 个条件</span>
-                    <span>{favorite.date ? `基准 ${formatDateBadge(favorite.date)}` : "不固定日期"}</span>
+                    <span>{favorite.date ? `基准 ${formatDateBadge(favorite.date)} ${normalizeBaselineTimeForPeriod(favorite.timeframe, favorite.as_of_time ?? "00:00")}` : "不固定日期"}</span>
                     <span>更新 {formatDateTime(favorite.updated_at)}</span>
                   </div>
                   <div className="favorite-condition-preview">
@@ -1931,12 +2047,22 @@ function MetadataConditionModal({
     ? metadataOperatorOptions.filter((item) => item.value !== "contains")
     : metadataOperatorOptions.filter((item) => ["any", "any_empty", "any_not_empty", "eq", "ne", "contains"].includes(item.value));
   const isValueFreeOperator = metadataOperatorNoValue(draft.operator);
-  const timePointError = selectedIndicator
+  const timePointMode = selectedIndicator
+    ? normalizeTimePointModeForPeriod(selectedIndicator.storage_period, draft.timePointMode, draft.timePoint)
+    : "baseline";
+  const timePointError = selectedIndicator && timePointMode === "fixed"
     ? metadataTimePointError(selectedIndicator.storage_period, draft.timePoint)
     : "";
+  const timeTakeError = selectedIndicator ? metadataTimeTakeError(selectedIndicator.storage_period, draft) : "";
   const timeStepSeconds = selectedIndicator ? metadataTimeStepSeconds(selectedIndicator.storage_period) : 60;
   const timeDisabled = selectedIndicator ? !metadataPeriodAllowsTime(selectedIndicator.storage_period) : true;
-  const canAdd = Boolean(selectedIndicator && metadataCanFilter(selectedIndicator) && (isValueFreeOperator || draft.value.trim()) && !timePointError);
+  const canAdd = Boolean(
+    selectedIndicator &&
+    metadataCanFilter(selectedIndicator) &&
+    (isValueFreeOperator || draft.value.trim()) &&
+    !timePointError &&
+    !timeTakeError,
+  );
 
   function selectIndicator(item: Indicator) {
     const nextOptions = item.data_type === "number"
@@ -1948,6 +2074,7 @@ function MetadataConditionModal({
       operator: nextOptions.some((option) => option.value === current.operator)
         ? current.operator
         : defaultMetadataOperator,
+      timePointMode: normalizeTimePointModeForPeriod(item.storage_period, current.timePointMode, current.timePoint),
       timePoint: normalizeDraftTimePointForPeriod(item.storage_period, current.timePoint),
     }));
     setMetadataSearch("");
@@ -1967,15 +2094,29 @@ function MetadataConditionModal({
       setError("请填写筛选条件的目标值。");
       return;
     }
-    const currentTimePointError = metadataTimePointError(selectedIndicator.storage_period, draft.timePoint);
-    if (currentTimePointError) {
-      setError(currentTimePointError);
+    const normalizedTimePointMode = normalizeTimePointModeForPeriod(
+      selectedIndicator.storage_period,
+      draft.timePointMode,
+      draft.timePoint,
+    );
+    const currentTimeTakeError = metadataTimeTakeError(selectedIndicator.storage_period, {
+      ...draft,
+      timePointMode: normalizedTimePointMode,
+    });
+    if (currentTimeTakeError) {
+      setError(currentTimeTakeError);
       return;
     }
     onApply({
       ...draft,
       value: isValueFreeOperator ? "" : draft.value.trim(),
-      timePoint: normalizeDraftTimePointForPeriod(selectedIndicator.storage_period, draft.timePoint),
+      timePointMode: normalizedTimePointMode,
+      timePoint: normalizedTimePointMode === "fixed"
+        ? normalizeDraftTimePointForPeriod(selectedIndicator.storage_period, draft.timePoint)
+        : "",
+      barOffset: normalizeNonNegativeText(draft.barOffset, "0"),
+      timeOffsetValue: normalizeNonNegativeText(draft.timeOffsetValue, "0"),
+      timeOffsetUnit: draft.timeOffsetUnit === "minute" ? "minute" : "hour",
       id: initialCondition?.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       indicator: selectedIndicator,
     });
@@ -2083,23 +2224,53 @@ function MetadataConditionModal({
                 </label>
               </div>
 
-              <div className="condition-form-row">
-                <label>K线时刻</label>
-                <input
-                  type="time"
-                  step={timeStepSeconds}
-                  value={timeDisabled ? "" : draft.timePoint}
+              <div className="condition-form-row condition-time-row">
+                <label>取值时间</label>
+                <select
+                  value={timePointMode}
                   disabled={timeDisabled}
-                  onChange={(event) => setDraft({ ...draft, timePoint: event.target.value })}
-                />
-                <span className={timePointError ? "condition-time-hint invalid" : "condition-time-hint"}>
-                  {timePointError || metadataTimePointHint(selectedIndicator.storage_period, draft.timePoint)}
-                </span>
-                {!timeDisabled && draft.timePoint && (
-                  <button className="condition-mini-button" onClick={() => setDraft({ ...draft, timePoint: "" })}>
-                    清空
-                  </button>
+                  onChange={(event) => setDraft({ ...draft, timePointMode: event.target.value, timePoint: "" })}
+                >
+                  <option value="baseline">跟随基准时间</option>
+                  <option value="bar_offset">前N根K线</option>
+                  <option value="time_offset">前N分钟/小时</option>
+                  <option value="fixed">固定时刻</option>
+                </select>
+                {timePointMode === "bar_offset" && (
+                  <input
+                    value={draft.barOffset}
+                    onChange={(event) => setDraft({ ...draft, barOffset: event.target.value })}
+                    placeholder="1"
+                  />
                 )}
+                {timePointMode === "time_offset" && (
+                  <>
+                    <input
+                      value={draft.timeOffsetValue}
+                      onChange={(event) => setDraft({ ...draft, timeOffsetValue: event.target.value })}
+                      placeholder="1"
+                    />
+                    <select
+                      value={draft.timeOffsetUnit === "minute" ? "minute" : "hour"}
+                      onChange={(event) => setDraft({ ...draft, timeOffsetUnit: event.target.value })}
+                    >
+                      <option value="hour">小时</option>
+                      <option value="minute">分钟</option>
+                    </select>
+                  </>
+                )}
+                {timePointMode === "fixed" && (
+                  <input
+                    type="time"
+                    step={timeStepSeconds}
+                    value={timeDisabled ? "" : draft.timePoint}
+                    disabled={timeDisabled}
+                    onChange={(event) => setDraft({ ...draft, timePoint: event.target.value })}
+                  />
+                )}
+                <span className={(timePointError || timeTakeError) ? "condition-time-hint invalid" : "condition-time-hint"}>
+                  {timeTakeError || timePointError || metadataTimePointHint(selectedIndicator.storage_period, draft)}
+                </span>
               </div>
 
               <div className="condition-form-row">
@@ -3795,7 +3966,11 @@ function defaultMetadataConditionDraft(): MetadataConditionDraft {
     indicatorId: "",
     timeMode: "previous_trading_day",
     timeOffset: "1",
+    timePointMode: "baseline",
     timePoint: "",
+    barOffset: "1",
+    timeOffsetValue: "1",
+    timeOffsetUnit: "hour",
     operator: defaultMetadataOperator,
     value: "",
     truncateMode: "none",
@@ -3811,7 +3986,11 @@ function draftFromCondition(condition: MetadataCondition): MetadataConditionDraf
     indicatorId: condition.indicator.id,
     timeMode: condition.timeMode,
     timeOffset: condition.timeOffset,
+    timePointMode: condition.timePointMode || legacyTimePointMode(condition.timePoint),
     timePoint: normalizeDraftTimePointForPeriod(condition.indicator.storage_period, condition.timePoint || ""),
+    barOffset: condition.barOffset || "1",
+    timeOffsetValue: condition.timeOffsetValue || "1",
+    timeOffsetUnit: condition.timeOffsetUnit || "hour",
     operator: condition.operator,
     value: condition.value,
     truncateMode: condition.truncateMode,
@@ -3829,7 +4008,11 @@ function toMetadataFilterPayload(condition: MetadataCondition): ScreenerMetadata
     value: condition.value,
     time_mode: condition.timeMode,
     time_offset: condition.timeOffset,
+    time_point_mode: condition.timePointMode || legacyTimePointMode(condition.timePoint),
     time_point: condition.timePoint || "",
+    bar_offset: condition.barOffset || "0",
+    time_offset_value: condition.timeOffsetValue || "0",
+    time_offset_unit: condition.timeOffsetUnit || "hour",
     truncate_mode: condition.truncateMode,
     truncate_count: condition.truncateCount,
     external_relation: condition.externalRelation,
@@ -3845,7 +4028,11 @@ function toFavoriteCondition(condition: MetadataCondition): ScreenerFavoriteCond
     indicator: condition.indicator,
     time_mode: condition.timeMode,
     time_offset: condition.timeOffset,
+    time_point_mode: condition.timePointMode || legacyTimePointMode(condition.timePoint),
     time_point: condition.timePoint,
+    bar_offset: condition.barOffset || "0",
+    time_offset_value: condition.timeOffsetValue || "0",
+    time_offset_unit: condition.timeOffsetUnit || "hour",
     operator: condition.operator,
     value: condition.value,
     truncate_mode: condition.truncateMode,
@@ -3864,7 +4051,11 @@ function fromFavoriteCondition(condition: ScreenerFavoriteCondition): MetadataCo
     indicator: condition.indicator,
     timeMode: condition.time_mode || "previous_trading_day",
     timeOffset: condition.time_offset || "1",
-    timePoint: condition.time_point || "",
+    timePointMode: condition.time_point_mode || legacyTimePointMode(condition.time_point || ""),
+    timePoint: normalizeDraftTimePointForPeriod(condition.indicator.storage_period, condition.time_point || ""),
+    barOffset: condition.bar_offset || "1",
+    timeOffsetValue: condition.time_offset_value || "1",
+    timeOffsetUnit: condition.time_offset_unit || "hour",
     operator: condition.operator || "gt",
     value: condition.value || "",
     truncateMode: condition.truncate_mode || "none",
@@ -3875,10 +4066,12 @@ function fromFavoriteCondition(condition: ScreenerFavoriteCondition): MetadataCo
   };
 }
 
-function favoriteName(conditions: MetadataCondition[], date: string) {
+function favoriteName(conditions: MetadataCondition[], date: string, asOfTime: string) {
   const names = conditions.slice(0, 2).map((condition) => condition.indicator.name_zh);
   const suffix = conditions.length > 2 ? `等${conditions.length}个条件` : `${conditions.length}个条件`;
-  return `${names.join(" + ")} ${suffix} · ${formatDateBadge(date) || "未选日期"}`;
+  const dateLabel = formatDateBadge(date) || "未选日期";
+  const timeLabel = date && asOfTime ? ` ${asOfTime}` : date ? " 最新K线" : "";
+  return `${names.join(" + ")} ${suffix} · ${dateLabel}${timeLabel}`;
 }
 
 function favoriteConditionText(condition: ScreenerFavoriteCondition) {
@@ -3954,10 +4147,11 @@ function uniqueValueConditions(
   conditions: MetadataCondition[],
   date: string,
   dates: Array<{ date: string; file_count: number }>,
+  asOfTime: string,
 ) {
   const seen = new Set<string>();
   return conditions.filter((condition) => {
-    const key = valueConditionKey(condition, date, dates);
+    const key = valueConditionKey(condition, date, dates, asOfTime);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -3968,11 +4162,12 @@ function valueConditionKey(
   condition: MetadataCondition,
   date: string,
   dates: Array<{ date: string; file_count: number }>,
+  asOfTime: string,
 ) {
   return metadataValueKey(
     condition.indicator.id,
-    conditionTargetDate(condition, date, dates),
-    condition.timePoint,
+    conditionTargetDate(condition, date, dates, asOfTime),
+    conditionTimePointKey(condition),
   );
 }
 
@@ -3980,14 +4175,23 @@ function conditionTimeSubtitle(
   condition: MetadataCondition,
   date: string,
   dates: Array<{ date: string; file_count: number }>,
+  asOfTime: string,
 ) {
   if (condition.timeMode === "previous_trading_day") {
-    const targetDate = conditionTargetDate(condition, date, dates);
+    const targetDate = conditionTargetDate(condition, date, dates, asOfTime);
     const suffix = targetDate ? ` ${formatDateBadge(targetDate)}` : "";
     return `前${condition.timeOffset || "N"}个交易日${suffix}${conditionTimePointSuffix(condition)}`;
   }
   if (condition.timeMode === "current_trading_day") {
+    if (!metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
+      const targetDate = conditionTargetDate(condition, date, dates, asOfTime);
+      return `${formatDateBadge(targetDate) || "上一完整日线"} 完整日线`;
+    }
     return `${formatDateBadge(date) || "当前交易日"}${conditionTimePointSuffix(condition)}`;
+  }
+  if (!metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
+    const targetDate = conditionTargetDate(condition, date, dates, asOfTime);
+    return `${formatDateBadge(targetDate) || "上一完整日线"} 完整日线`;
   }
   return `最新可用时间${conditionTimePointSuffix(condition)}`;
 }
@@ -3998,11 +4202,42 @@ function conditionTimePointSuffix(condition: MetadataCondition) {
 
 function conditionTimePointText(condition: MetadataCondition) {
   if (!metadataPeriodAllowsTime(condition.indicator.storage_period)) return "";
-  return condition.timePoint ? ` ${condition.timePoint}` : " 最新K线";
+  const mode = conditionTimePointMode(condition);
+  if (mode === "fixed") return condition.timePoint ? ` 固定${condition.timePoint}` : " 固定时刻";
+  if (mode === "bar_offset") {
+    const offset = normalizeNonNegativeText(condition.barOffset, "0");
+    return offset === "0" ? " 基准时间" : ` 前${offset}根K线`;
+  }
+  if (mode === "time_offset") {
+    const offset = normalizeNonNegativeText(condition.timeOffsetValue, "0");
+    const unit = condition.timeOffsetUnit === "minute" ? "分钟" : "小时";
+    return offset === "0" ? " 基准时间" : ` 前${offset}${unit}`;
+  }
+  return " 基准时间";
 }
 
-function metadataValueKey(indicatorId: string, targetDate: string, timePoint: string | undefined) {
-  return `${indicatorId}::${targetDate}::${normalizeConditionTimePoint(timePoint) || "latest"}`;
+function metadataValueKey(indicatorId: string, targetDate: string, timePointKey: string | undefined) {
+  return `${indicatorId}::${targetDate}::${normalizeConditionTimePoint(timePointKey) || "latest"}`;
+}
+
+function conditionTimePointMode(condition: Pick<MetadataConditionDraft, "timePointMode" | "timePoint">) {
+  return normalizeTimePointModeForPeriod("1m", condition.timePointMode, condition.timePoint);
+}
+
+function conditionTimePointKey(condition: MetadataCondition) {
+  if (!metadataPeriodAllowsTime(condition.indicator.storage_period)) return "latest";
+  const mode = conditionTimePointMode(condition);
+  if (mode === "fixed") return normalizeConditionTimePoint(condition.timePoint) || "latest";
+  if (mode === "bar_offset") {
+    const offset = normalizeNonNegativeText(condition.barOffset, "0");
+    return offset === "0" ? "latest" : `bar_offset:${offset}`;
+  }
+  if (mode === "time_offset") {
+    const offset = normalizeNonNegativeText(condition.timeOffsetValue, "0");
+    const unit = condition.timeOffsetUnit === "minute" ? "minute" : "hour";
+    return offset === "0" ? "latest" : `time_offset:${offset}${unit}`;
+  }
+  return "latest";
 }
 
 function normalizeConditionTimePoint(value: string | undefined) {
@@ -4015,6 +4250,53 @@ function normalizeDraftTimePointForPeriod(period: string, value: string | undefi
   return metadataTimePointError(period, normalized) ? "" : normalized;
 }
 
+function normalizeBaselineTimeForPeriod(period: string, value: string | undefined) {
+  const [hour, minute] = baselineTimeParts(value || "00:00");
+  const minuteOptions = baselineMinuteOptions(period);
+  const alignedMinute = minuteOptions
+    .slice()
+    .reverse()
+    .find((item) => item <= minute) ?? minuteOptions[0] ?? 0;
+  const normalizedHour = metadataPeriodAllowsTime(period) ? hour : 0;
+  return formatTimeParts(normalizedHour, alignedMinute);
+}
+
+function baselineTimeParts(value: string) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (!match) return [0, 0] as const;
+  const hour = Math.max(0, Math.min(23, Number.parseInt(match[1], 10) || 0));
+  const minute = Math.max(0, Math.min(59, Number.parseInt(match[2], 10) || 0));
+  return [hour, minute] as const;
+}
+
+function baselineMinuteOptions(period: string) {
+  const step = metadataPeriodStepMinutes(period);
+  if (step === null || step >= 60) return [0];
+  const safeStep = Math.max(1, step);
+  return Array.from({ length: Math.ceil(60 / safeStep) }, (_, index) => index * safeStep).filter((item) => item < 60);
+}
+
+function formatTimeParts(hour: number, minute: number) {
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function legacyTimePointMode(timePoint: string | undefined) {
+  return normalizeConditionTimePoint(timePoint) ? "fixed" : "baseline";
+}
+
+function normalizeTimePointModeForPeriod(period: string, mode: string | undefined, timePoint: string | undefined) {
+  if (!metadataPeriodAllowsTime(period)) return "baseline";
+  const normalized = (mode || "").trim();
+  if (["baseline", "bar_offset", "time_offset", "fixed"].includes(normalized)) return normalized;
+  return legacyTimePointMode(timePoint);
+}
+
+function normalizeNonNegativeText(value: string | undefined, fallback: string) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return String(parsed);
+}
+
 function metadataPeriodAllowsTime(period: string) {
   return metadataPeriodStepMinutes(period) !== null;
 }
@@ -4023,13 +4305,23 @@ function metadataTimeStepSeconds(period: string) {
   return (metadataPeriodStepMinutes(period) ?? 1) * 60;
 }
 
-function metadataTimePointHint(period: string, timePoint: string | undefined) {
+function metadataTimePointHint(period: string, timePoint: string | MetadataConditionDraft | undefined) {
   const label = timeframeLabels[period] ?? period;
   const step = metadataPeriodStepMinutes(period);
   if (step === null) return `${label}只按交易日取值，不填写分钟时间`;
   const rule = metadataTimePointRuleText(period);
-  if (timePoint) return `取 ${timePoint} 这根 ${label} K线；${rule}`;
-  return `不填则取该日期最新一根${label}K线；${rule}`;
+  if (typeof timePoint !== "object") {
+    if (timePoint) return `取 ${timePoint} 这根 ${label} K线；${rule}`;
+    return `跟随全局基准时间；${rule}`;
+  }
+  const mode = normalizeTimePointModeForPeriod(period, timePoint.timePointMode, timePoint.timePoint);
+  if (mode === "bar_offset") return `按全局基准时间向前偏移 ${timePoint.barOffset || "N"} 根${label}K线；${rule}`;
+  if (mode === "time_offset") {
+    const unit = timePoint.timeOffsetUnit === "minute" ? "分钟" : "小时";
+    return `按全局基准时间向前偏移 ${timePoint.timeOffsetValue || "N"} ${unit}；${rule}`;
+  }
+  if (mode === "fixed") return timePoint.timePoint ? `每天固定取 ${timePoint.timePoint} 这根${label}K线；${rule}` : `固定时刻；${rule}`;
+  return `跟随全局基准时间，偏移0；${rule}`;
 }
 
 function metadataTimePointRuleText(period: string) {
@@ -4060,6 +4352,21 @@ function metadataTimePointError(period: string, value: string | undefined) {
   return "";
 }
 
+function metadataTimeTakeError(period: string, draft: MetadataConditionDraft) {
+  if (!metadataPeriodAllowsTime(period)) return "";
+  const mode = normalizeTimePointModeForPeriod(period, draft.timePointMode, draft.timePoint);
+  if (mode === "fixed") return metadataTimePointError(period, draft.timePoint) || (draft.timePoint ? "" : "请填写固定 K线时刻");
+  if (mode === "bar_offset") {
+    const raw = String(draft.barOffset || "").trim();
+    if (!/^\d+$/.test(raw)) return "K线偏移必须是大于等于0的整数";
+  }
+  if (mode === "time_offset") {
+    const raw = String(draft.timeOffsetValue || "").trim();
+    if (!/^\d+$/.test(raw)) return "时间偏移必须是大于等于0的整数";
+  }
+  return "";
+}
+
 function metadataPeriodStepMinutes(period: string) {
   const normalized = period.trim().toLowerCase();
   const match = normalized.match(/^(\d+)(m|h|d)$/);
@@ -4075,17 +4382,73 @@ function conditionTargetDate(
   condition: MetadataCondition,
   date: string,
   dates: Array<{ date: string; file_count: number }>,
+  asOfTime = "",
 ) {
-  if (condition.timeMode !== "previous_trading_day") return date;
+  if (!metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime && condition.timeMode !== "previous_trading_day") {
+    return previousAvailableDate(date, dates);
+  }
+  if (condition.timeMode !== "previous_trading_day") {
+    if (metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
+      return conditionTargetPartitionDate(condition, date, asOfTime);
+    }
+    return date;
+  }
   const offset = Math.max(1, Number.parseInt(condition.timeOffset, 10) || 1);
   const currentIndex = dates.findIndex((item) => item.date === date);
+  let targetDate = date;
   if (currentIndex >= 0) {
-    return dates[currentIndex + offset]?.date ?? dates[dates.length - 1]?.date ?? date;
+    targetDate = dates[currentIndex + offset]?.date ?? dates[dates.length - 1]?.date ?? date;
+  } else {
+    const ascending = dates.map((item) => item.date).slice().sort();
+    const insertAt = ascending.findIndex((item) => item >= date);
+    const baseIndex = insertAt >= 0 ? insertAt : ascending.length;
+    targetDate = ascending[Math.max(0, baseIndex - offset)] ?? date;
   }
+  if (metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
+    return conditionTargetPartitionDate(condition, targetDate, asOfTime);
+  }
+  return targetDate;
+}
+
+function conditionTargetPartitionDate(condition: MetadataCondition, date: string, asOfTime: string) {
+  const baseTs = shanghaiLocalTimestamp(date, asOfTime);
+  if (baseTs === null) return date;
+  const mode = conditionTimePointMode(condition);
+  let targetTs = baseTs;
+  if (mode === "bar_offset") {
+    const offset = Number.parseInt(normalizeNonNegativeText(condition.barOffset, "0"), 10);
+    targetTs -= offset * (metadataPeriodStepMinutes(condition.indicator.storage_period) ?? 1) * 60_000;
+  } else if (mode === "time_offset") {
+    const offset = Number.parseInt(normalizeNonNegativeText(condition.timeOffsetValue, "0"), 10);
+    const unitMinutes = condition.timeOffsetUnit === "minute" ? 1 : 60;
+    targetTs -= offset * unitMinutes * 60_000;
+  } else if (mode === "fixed") {
+    const fixedTs = shanghaiLocalTimestamp(date, condition.timePoint);
+    if (fixedTs !== null) targetTs = fixedTs;
+  }
+  return new Date(targetTs).toISOString().slice(0, 10);
+}
+
+function shanghaiLocalTimestamp(date: string, time: string) {
+  const dateMatch = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const timeMatch = time.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!dateMatch || !timeMatch) return null;
+  const year = Number.parseInt(dateMatch[1], 10);
+  const month = Number.parseInt(dateMatch[2], 10);
+  const day = Number.parseInt(dateMatch[3], 10);
+  const hour = Number.parseInt(timeMatch[1], 10);
+  const minute = Number.parseInt(timeMatch[2], 10);
+  const second = timeMatch[3] ? Number.parseInt(timeMatch[3], 10) : 0;
+  return Date.UTC(year, month - 1, day, hour - 8, minute, second);
+}
+
+function previousAvailableDate(date: string, dates: Array<{ date: string; file_count: number }>) {
+  const currentIndex = dates.findIndex((item) => item.date === date);
+  if (currentIndex >= 0) return dates[currentIndex + 1]?.date ?? dates[dates.length - 1]?.date ?? date;
   const ascending = dates.map((item) => item.date).slice().sort();
   const insertAt = ascending.findIndex((item) => item >= date);
   const baseIndex = insertAt >= 0 ? insertAt : ascending.length;
-  return ascending[Math.max(0, baseIndex - offset)] ?? date;
+  return ascending[Math.max(0, baseIndex - 1)] ?? date;
 }
 
 function preferredQueryDate(timeframe: TimeframeSummary) {

@@ -52,7 +52,11 @@ export type ScreenerMetadataFilterPayload = {
   value: string;
   time_mode?: string;
   time_offset?: string;
+  time_point_mode?: string;
   time_point?: string;
+  bar_offset?: string;
+  time_offset_value?: string;
+  time_offset_unit?: string;
   truncate_mode?: string;
   truncate_count?: string;
   external_relation?: boolean;
@@ -360,7 +364,11 @@ export type ScreenerFavoriteCondition = {
   indicator: Indicator;
   time_mode: string;
   time_offset: string;
+  time_point_mode?: string;
   time_point: string;
+  bar_offset?: string;
+  time_offset_value?: string;
+  time_offset_unit?: string;
   operator: string;
   value: string;
   truncate_mode: string;

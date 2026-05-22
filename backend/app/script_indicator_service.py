@@ -164,7 +164,7 @@ def trial_run(
     parse_error = ""
     if output_file.exists():
         try:
-            rows, output_count = _read_output_rows(output_file, max(1, min(limit, 1000)))
+            rows, output_count = _read_output_rows(output_file, max(1, min(limit, 200_000)))
         except ValueError as exc:
             parse_error = str(exc)
     elif return_code == 0 and not timed_out:

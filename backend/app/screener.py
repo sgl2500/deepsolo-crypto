@@ -5,7 +5,7 @@ import gzip
 import math
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -46,9 +46,12 @@ def query_screener(
     if not selected_date:
         return _empty_response(timeframe, date, "No data partition found.")
 
+    requested_date = selected_date
     as_of_ts = _parse_as_of(as_of)
+    if as_of_ts is not None:
+        selected_date = _partition_date_from_ts(timeframe, as_of_ts)
     files = data_source_service.contract_files(timeframe, selected_date)
-    metadata_filter_specs = _prepare_metadata_filter_specs(metadata_filters or [], selected_date)
+    metadata_filter_specs = _prepare_metadata_filter_specs(metadata_filters or [], requested_date, as_of_ts)
     metadata_period_files = _metadata_period_files(metadata_filter_specs)
     metadata_script_values = _metadata_script_values(metadata_filter_specs, script_values_cache)
     rows: list[dict[str, Any]] = []
@@ -302,7 +305,9 @@ def _match_metadata_filters(
 
         indicator_period = str(indicator.get("storage_period") or base_timeframe)
         target_date = str(condition.get("_target_date") or "")
-        condition_as_of_ts = _condition_as_of_ts(condition, target_date, indicator_period, as_of_ts)
+        condition_as_of_ts = condition.get("_condition_as_of_ts")
+        if condition_as_of_ts is None:
+            condition_as_of_ts = _condition_as_of_ts(condition, target_date, indicator_period, as_of_ts)
         operator = str(condition.get("operator") or "gt")
         expected = str(condition.get("value") or "")
         value_mode = _value_mode(operator)
@@ -317,7 +322,9 @@ def _match_metadata_filters(
             )
             if source_row is not None and condition.get("match_current_bar"):
                 source_ts = _to_int(source_row.get("ts"))
-                target_ts = condition_as_of_ts if condition_as_of_ts is not None else as_of_ts
+                target_ts = condition_as_of_ts
+                if target_ts is None and _period_step_minutes(indicator_period) is not None:
+                    target_ts = as_of_ts
                 if target_ts is not None and source_ts != target_ts:
                     source_row = None
             if source_row is None:
@@ -368,7 +375,7 @@ def _match_metadata_filters(
                     continue
             raw_value = source_row.get(raw_field, "") or ""
 
-        value_key = _metadata_value_key(indicator_id, target_date, str(condition.get("time_point") or ""))
+        value_key = _metadata_value_key(indicator_id, target_date, _condition_time_point_key(condition, indicator_period))
         values[value_key] = raw_value
         values[indicator_id] = raw_value
         if value_mode == "any":
@@ -403,15 +410,30 @@ def _match_metadata_filters(
     return True, reasons, values
 
 
-def _prepare_metadata_filter_specs(filters: list[dict[str, Any]], selected_date: str) -> list[dict[str, Any]]:
+def _prepare_metadata_filter_specs(
+    filters: list[dict[str, Any]],
+    selected_date: str,
+    as_of_ts: int | None,
+) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     for condition in filters:
         indicator_id = str(condition.get("indicator_id") or "")
         indicator = indicator_repository.get(indicator_id)
         target_date = ""
+        condition_as_of_ts = None
         if indicator:
-            target_date = _condition_target_date(condition, str(indicator.get("storage_period")), selected_date)
-        specs.append({**condition, "_indicator": indicator, "_target_date": target_date})
+            indicator_period = str(indicator.get("storage_period"))
+            target_local_date = _condition_target_local_date(condition, indicator_period, selected_date, as_of_ts)
+            condition_as_of_ts = _condition_as_of_ts(condition, target_local_date, indicator_period, as_of_ts)
+            target_date = target_local_date
+            if condition_as_of_ts is not None and _period_step_minutes(indicator_period) is not None:
+                target_date = _partition_date_from_ts(indicator_period, condition_as_of_ts)
+        specs.append({
+            **condition,
+            "_indicator": indicator,
+            "_target_date": target_date,
+            "_condition_as_of_ts": condition_as_of_ts,
+        })
     return specs
 
 
@@ -457,7 +479,7 @@ def _metadata_script_values(
             indicator_id,
             date=target_date,
             input_timeframe=input_timeframe,
-            limit=1000,
+            limit=200_000,
         )
         if result.get("timed_out"):
             detail = result.get("stderr") or "脚本指标运行超时"
@@ -498,22 +520,22 @@ def _latest_script_row(
     return selected
 
 
-def _condition_target_date(condition: dict[str, Any], period: str, selected_date: str) -> str:
+def _condition_target_local_date(
+    condition: dict[str, Any],
+    period: str,
+    selected_date: str,
+    as_of_ts: int | None,
+) -> str:
+    reference_date = _local_date_from_ts(as_of_ts) if as_of_ts is not None else selected_date
     if condition.get("time_mode") != "previous_trading_day":
-        return selected_date
+        if _period_step_minutes(period) is None and as_of_ts is not None:
+            # At an intraday global baseline, a 1D condition can only see the
+            # previous completed daily candle; the current daily candle is not final.
+            return _available_date_offset_before(period, reference_date, 1) or _date_offset(reference_date, -1)
+        return reference_date
 
     offset = _positive_int(condition.get("time_offset"), default=1)
-    dates = _available_dates(period)
-    if not dates:
-        return selected_date
-
-    insert_at = bisect_left(dates, selected_date)
-    if insert_at < len(dates) and dates[insert_at] == selected_date:
-        target_index = insert_at - offset
-    else:
-        target_index = insert_at - offset
-    target_index = max(0, min(target_index, len(dates) - 1))
-    return dates[target_index]
+    return _available_date_offset_before(period, reference_date, offset) or _date_offset(reference_date, -offset)
 
 
 def _condition_as_of_ts(
@@ -522,10 +544,30 @@ def _condition_as_of_ts(
     indicator_period: str,
     fallback_as_of_ts: int | None,
 ) -> int | None:
+    if _period_step_minutes(indicator_period) is None:
+        return None
+
+    mode = _condition_time_point_mode(condition)
     time_point = str(condition.get("time_point") or "").strip()
-    if time_point:
+    if mode == "fixed" and time_point:
         return _parse_time_point(target_date, time_point, indicator_period)
-    return fallback_as_of_ts
+
+    if fallback_as_of_ts is None:
+        return None
+    baseline_ts = _same_local_time_on_date(target_date, fallback_as_of_ts) if target_date else fallback_as_of_ts
+
+    if mode == "bar_offset":
+        offset = _non_negative_int(condition.get("bar_offset"), default=0)
+        step = _period_step_minutes(indicator_period) or 1
+        return baseline_ts - offset * step * 60_000
+
+    if mode == "time_offset":
+        offset = _non_negative_int(condition.get("time_offset_value"), default=0)
+        unit = str(condition.get("time_offset_unit") or "hour").strip().lower()
+        unit_minutes = 1 if unit in ("minute", "minutes", "m", "分钟") else 60
+        return baseline_ts - offset * unit_minutes * 60_000
+
+    return baseline_ts
 
 
 def _parse_time_point(date: str, time_point: str, indicator_period: str) -> int:
@@ -547,9 +589,35 @@ def _parse_time_point(date: str, time_point: str, indicator_period: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def _metadata_value_key(indicator_id: str, target_date: str, time_point: str) -> str:
-    normalized_time = time_point.strip() or "latest"
+def _metadata_value_key(indicator_id: str, target_date: str, time_point_key: str) -> str:
+    normalized_time = time_point_key.strip() or "latest"
     return f"{indicator_id}::{target_date}::{normalized_time}"
+
+
+def _condition_time_point_mode(condition: dict[str, Any]) -> str:
+    mode = str(condition.get("time_point_mode") or "").strip().lower()
+    if mode in {"baseline", "bar_offset", "time_offset", "fixed"}:
+        return mode
+    if str(condition.get("time_point") or "").strip():
+        return "fixed"
+    return "baseline"
+
+
+def _condition_time_point_key(condition: dict[str, Any], indicator_period: str) -> str:
+    if _period_step_minutes(indicator_period) is None:
+        return "latest"
+    mode = _condition_time_point_mode(condition)
+    if mode == "fixed":
+        return str(condition.get("time_point") or "").strip() or "latest"
+    if mode == "bar_offset":
+        offset = _non_negative_int(condition.get("bar_offset"), default=0)
+        return "latest" if offset == 0 else f"bar_offset:{offset}"
+    if mode == "time_offset":
+        offset = _non_negative_int(condition.get("time_offset_value"), default=0)
+        unit = str(condition.get("time_offset_unit") or "hour").strip().lower()
+        unit_key = "minute" if unit in ("minute", "minutes", "m", "分钟") else "hour"
+        return "latest" if offset == 0 else f"time_offset:{offset}{unit_key}"
+    return "latest"
 
 
 def _period_step_minutes(period: str) -> int | None:
@@ -585,12 +653,63 @@ def _available_dates(period: str) -> list[str]:
     return sorted(dates)
 
 
+def _available_date_before(period: str, reference_date: str) -> str | None:
+    return _available_date_offset_before(period, reference_date, 1)
+
+
+def _available_date_offset_before(period: str, reference_date: str, offset: int) -> str | None:
+    dates = _available_dates(period)
+    if not dates:
+        return None
+    safe_offset = max(1, offset)
+    target_index = bisect_left(dates, reference_date) - safe_offset
+    if target_index < 0:
+        return dates[0]
+    return dates[target_index]
+
+
+def _local_date_from_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts / 1000, tz=ZoneInfo(APP_TIMEZONE)).date().isoformat()
+
+
+def _date_offset(value: str, days: int) -> str:
+    try:
+        current = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return (current + timedelta(days=days)).date().isoformat()
+
+
+def _partition_date_from_ts(period: str, ts: int) -> str:
+    if _period_step_minutes(period) is None:
+        dt = datetime.fromtimestamp(ts / 1000, tz=ZoneInfo(APP_TIMEZONE))
+    else:
+        # Intraday folders use UTC date partitions: CST 08:00 to next-day 07:59.
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    return dt.date().isoformat()
+
+
+def _same_local_time_on_date(target_date: str, source_ts: int) -> int:
+    source_dt = datetime.fromtimestamp(source_ts / 1000, tz=ZoneInfo(APP_TIMEZONE))
+    target_dt = datetime.fromisoformat(f"{target_date}T{source_dt.strftime('%H:%M:%S')}")
+    target_dt = target_dt.replace(tzinfo=ZoneInfo(APP_TIMEZONE))
+    return int(target_dt.timestamp() * 1000)
+
+
 def _positive_int(value: Any, default: int) -> int:
     try:
         parsed = int(str(value))
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _latest_raw_row(path: Path, as_of_ts: int | None) -> dict[str, str] | None:

@@ -789,13 +789,136 @@ nav {
 }
 
 .focused-date-row {
-  grid-template-columns: auto minmax(360px, 1fr);
+  grid-template-columns: auto auto minmax(260px, 420px);
   justify-content: start;
+  gap: 18px;
   padding: 12px 0 14px;
 }
 
 .compact-date-switcher {
   justify-content: start;
+}
+
+.asof-time-control {
+  display: grid;
+  gap: 5px;
+  min-width: 260px;
+}
+
+.asof-time-control label {
+  color: #111827;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.asof-time-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.asof-time-control small {
+  min-height: 16px;
+  color: #8a929e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.asof-time-control small.error {
+  color: #d92d20;
+}
+
+.baseline-time-picker {
+  position: relative;
+}
+
+.baseline-time-trigger {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 184px;
+  height: 38px;
+  padding: 0 12px;
+  color: #1f2937;
+  background: #ffffff;
+  border: 1px solid #cfd8e3;
+  border-radius: 9px;
+  box-shadow: 0 8px 18px rgba(31, 41, 55, 0.07);
+}
+
+.baseline-time-trigger span {
+  font-family: "DIN Alternate", "Avenir Next", sans-serif;
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.baseline-time-trigger em {
+  color: #2f80ed;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.baseline-time-popover {
+  position: absolute;
+  top: 44px;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 74px 74px;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid #d9e4f2;
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+}
+
+.time-wheel-column {
+  display: grid;
+  gap: 6px;
+}
+
+.time-wheel-column strong {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.time-wheel-list {
+  overflow-y: auto;
+  display: grid;
+  gap: 4px;
+  max-height: 176px;
+  padding-right: 2px;
+  scroll-snap-type: y mandatory;
+}
+
+.time-wheel-list button {
+  height: 30px;
+  color: #536070;
+  font-family: "DIN Alternate", "Avenir Next", sans-serif;
+  font-size: 15px;
+  font-weight: 900;
+  background: #f6f8fb;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  scroll-snap-align: center;
+}
+
+.time-wheel-list button.active {
+  color: #0b63ce;
+  background: #eaf3ff;
+  border-color: #9bcbff;
+}
+
+.time-wheel-column.locked .time-wheel-list button {
+  color: #98a2b3;
+  background: #f3f6fa;
+  cursor: not-allowed;
 }
 
 .focused-table-panel {
@@ -3667,6 +3790,14 @@ input {
 
 .condition-form-row.narrow-row {
   grid-template-columns: 126px 180px 180px;
+}
+
+.condition-form-row.condition-time-row {
+  grid-template-columns: 126px 180px 120px 120px minmax(240px, 1fr);
+}
+
+.condition-time-row .condition-time-hint {
+  grid-column: auto / -1;
 }
 
 .condition-form-row > label:first-child {
