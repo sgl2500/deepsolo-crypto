@@ -71,10 +71,10 @@ const klinePeriodOptions = [
   { value: "1m", label: "1分钟" },
 ];
 const backtestSignalTimeframeOptions = [
-  { value: "1H", label: "1小时信号" },
-  { value: "5m", label: "5分钟信号" },
-  { value: "1m", label: "1分钟信号" },
-  { value: "1D", label: "日线信号" },
+  { value: "1H", label: "1小时扫描" },
+  { value: "5m", label: "5分钟扫描" },
+  { value: "1m", label: "1分钟扫描" },
+  { value: "1D", label: "日线扫描" },
 ];
 const backtestEntryTimeframeOptions = [
   { value: "1m", label: "1分钟成交" },
@@ -1279,6 +1279,17 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.signalSetId]);
 
+  useEffect(() => {
+    if (!form.favoriteId || signalSets.length === 0) return;
+    const currentSignalSet = signalSets.find((item) => item.id === form.signalSetId);
+    if (currentSignalSet?.favorite_id === form.favoriteId) return;
+    const latestForFavorite = signalSets.find((item) => item.favorite_id === form.favoriteId);
+    setForm((current) => ({
+      ...current,
+      signalSetId: latestForFavorite?.id ?? "",
+    }));
+  }, [form.favoriteId, form.signalSetId, signalSets]);
+
   async function loadFavorites() {
     setLoadingFavorites(true);
     setError(null);
@@ -1306,7 +1317,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
         signalSetId: current.signalSetId || data.items[0]?.id || "",
       }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "信号池加载失败");
+      setError(err instanceof Error ? err.message : "异动表加载失败");
     } finally {
       setLoadingSignalSets(false);
     }
@@ -1318,7 +1329,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       const data = await fetchSignalSetEvents(signalSetId, 200);
       setSignalEvents(data.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "信号明细加载失败");
+      setError(err instanceof Error ? err.message : "异动明细加载失败");
     } finally {
       setLoadingEvents(false);
     }
@@ -1373,12 +1384,12 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       setSignalSets((current) => [signalSet, ...current.filter((item) => item.id !== signalSet.id)]);
       setForm((current) => ({ ...current, signalSetId: signalSet.id }));
       if (signalSet.status === "failed") {
-        setError(signalSet.error || "信号池生成失败");
+        setError(signalSet.error || "异动信号生成失败");
       } else {
         void loadSignalEvents(signalSet.id);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "信号池生成失败");
+      setError(err instanceof Error ? err.message : "异动信号生成失败");
     } finally {
       setGeneratingSignalSet(false);
     }
@@ -1386,7 +1397,12 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
 
   async function startBacktest() {
     if (!form.signalSetId) {
-      setError("请先生成或选择一个信号池。");
+      setError("请先生成或选择一张异动信号表。");
+      return;
+    }
+    const currentSignalSet = signalSets.find((item) => item.id === form.signalSetId);
+    if (currentSignalSet && currentSignalSet.status !== "completed") {
+      setError("请选择已完成的异动表再开始回测。");
       return;
     }
     setRunning(true);
@@ -1490,14 +1506,17 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   }
 
   const selectedFavorite = favorites.find((item) => item.id === form.favoriteId) ?? null;
+  const favoriteSignalSets = signalSets.filter((item) => item.favorite_id === form.favoriteId);
   const selectedSignalSet = signalSets.find((item) => item.id === form.signalSetId) ?? null;
   const result = activeRun?.result ?? null;
   const summaryStats = result?.summary;
   const trades = result?.trades ?? [];
   const checkpoints = result?.checkpoints ?? [];
+  const equityPoints = result?.daily_equity?.length ? result.daily_equity : result?.equity ?? [];
   const signalModeDisabled = form.signalTimeframe === "1D";
   const tradeKlinePeriod = activeRun?.config.entry_timeframe ?? form.entryTimeframe;
   const selectedSignalSummary = selectedSignalSet?.summary ?? null;
+  const canStartBacktest = Boolean(form.signalSetId && selectedSignalSet?.status === "completed");
 
   return (
     <section className="metadata-page backtest-page">
@@ -1505,15 +1524,15 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
         <div>
           <h1>回测验证</h1>
           <p className="contract-page-subtitle">
-            先把收藏条件离线生成信号池，再配置入场、出场、仓位规则做验证；成交明细可直接打开K线看买卖点。
+            收藏条件先沉淀成按时间排序的异动信号表，再配置买卖规则和账户参数做可复现回测。
           </p>
         </div>
         <div className="metadata-actions">
           <button className="secondary-action" onClick={() => { void loadFavorites(); void loadSignalSets(); void loadRuns(); }}>
             刷新
           </button>
-          <button className="primary-action" disabled={running || generatingSignalSet || loadingSignalSets} onClick={() => void startBacktest()}>
-            {running ? "回测中..." : "基于信号池回测"}
+          <button className="primary-action" disabled={running || generatingSignalSet || loadingSignalSets || !canStartBacktest} onClick={() => void startBacktest()}>
+            {running ? "回测中..." : "开始回测"}
           </button>
         </div>
       </div>
@@ -1529,8 +1548,8 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
           >
             <div className="backtest-card-head">
               <span className="eyebrow">Step 1</span>
-              <strong>收藏条件生成信号池</strong>
-              <em>{selectedFavorite ? `${selectedFavorite.condition_count} 条条件` : "先选择收藏"}</em>
+              <strong>收藏条件生成异动表</strong>
+              <em>{selectedFavorite ? `${selectedFavorite.condition_count} 条条件 · ${favoriteSignalSets.length} 张历史表` : "先选择收藏"}</em>
             </div>
             <div className="backtest-form-grid">
               <label className="field wide">
@@ -1548,9 +1567,9 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 </select>
               </label>
               <label className="field wide">
-                <span>信号池名称</span>
+                <span>异动表名称</span>
                 <input
-                  placeholder={selectedFavorite ? `${selectedFavorite.name} 信号池` : "可不填，系统自动命名"}
+                  placeholder={selectedFavorite ? `${selectedFavorite.name} 异动信号` : "可不填，系统自动命名"}
                   value={form.signalSetName}
                   onChange={(event) => updateForm("signalSetName", event.target.value)}
                 />
@@ -1564,7 +1583,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 <input type="date" value={form.endDate} onChange={(event) => updateForm("endDate", event.target.value)} />
               </label>
               <label className="field">
-                <span>信号周期</span>
+                <span>异动扫描周期</span>
                 <select value={form.signalTimeframe} onChange={(event) => changeSignalTimeframe(event.target.value)}>
                   {backtestSignalTimeframeOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
@@ -1572,7 +1591,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 </select>
               </label>
               <label className="field">
-                <span>信号频率</span>
+                <span>异动扫描频率</span>
                 <select value={form.signalMode} onChange={(event) => changeSignalMode(event.target.value)}>
                   {backtestSignalModeOptions.map((option) => (
                     <option
@@ -1588,13 +1607,74 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
             </div>
             <div className="backtest-form-actions">
               <p className="backtest-hint">
-                防未来函数：收藏条件只看到当前信号K线收盘前的数据，信号在下一根K线开始时才确认。
+                异动表会记录合约、异动时间、确认时间和命中快照；回测只从确认时间之后交易，避免未来函数。
               </p>
               <button className="primary-action" disabled={generatingSignalSet || loadingFavorites} type="submit">
-                {generatingSignalSet ? "生成中..." : "生成信号池"}
+                {generatingSignalSet ? "生成中..." : "生成/刷新异动表"}
               </button>
             </div>
           </form>
+
+          <div className="backtest-card signal-set-preview">
+            <div className="backtest-card-head">
+              <span className="eyebrow">Step 2</span>
+              <strong>异动信号表</strong>
+              <em>{selectedSignalSet ? `${runStatusLabel(selectedSignalSet.status)} · ${formatDateTime(selectedSignalSet.created_at)}` : "选择或生成后查看"}</em>
+            </div>
+            {!selectedSignalSet ? (
+              <EmptyState title="暂无异动信号表" text="先选择收藏条件并点击「生成/刷新异动表」，这里会展示按时间排序的异动记录。" />
+            ) : (
+              <>
+                <div className="signal-set-stats">
+                  <span>异动信号 <b>{selectedSignalSummary?.event_count ?? 0}</b></span>
+                  <span>唯一合约 <b>{selectedSignalSummary?.unique_contracts ?? 0}</b></span>
+                  <span>扫描时刻 <b>{selectedSignalSummary?.checkpoint_count ?? 0}</b></span>
+                  <span>区间 <b>{selectedSignalSummary?.start_date ?? "--"} ~ {selectedSignalSummary?.end_date ?? "--"}</b></span>
+                  <span>首个异动 <b>{selectedSignalSummary?.first_signal_time ?? "--"}</b></span>
+                  <span>最后异动 <b>{selectedSignalSummary?.last_signal_time ?? "--"}</b></span>
+                </div>
+                <div className="anomaly-table-scroll">
+                  <table className="anomaly-table">
+                    <thead>
+                      <tr>
+                        <th>异动时间</th>
+                        <th>确认时间</th>
+                        <th>合约代码</th>
+                        <th>异动名称</th>
+                        <th>强度</th>
+                        <th>命中条件</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {loadingEvents ? (
+                        <tr>
+                          <td colSpan={6}>正在加载异动明细...</td>
+                        </tr>
+                      ) : signalEvents.length === 0 ? (
+                        <tr>
+                          <td colSpan={6}>这张异动表没有命中记录。</td>
+                        </tr>
+                      ) : (
+                        signalEvents.slice(0, 200).map((event) => (
+                          <tr key={event.id}>
+                            <td>{event.signal_time ?? "--"}</td>
+                            <td>{event.confirm_time ?? "--"}</td>
+                            <td>{event.inst_id}</td>
+                            <td>{selectedFavorite?.name ?? selectedSignalSet.name}</td>
+                            <td>{formatOptionalNumber(event.strength)}</td>
+                            <td>{(event.matched_conditions || []).slice(0, 2).join("；") || "--"}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                {signalEvents.length > 200 && (
+                  <p className="backtest-hint">当前仅展示前 200 条异动，完整数据已存入本地 SQLite。</p>
+                )}
+              </>
+            )}
+          </div>
 
           <form
             className="backtest-card backtest-form"
@@ -1604,20 +1684,20 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
             }}
           >
             <div className="backtest-card-head">
-              <span className="eyebrow">Step 2</span>
-              <strong>入场与出场规则</strong>
-              <em>默认复刻 v001 泵后回落做空</em>
+              <span className="eyebrow">Step 3</span>
+              <strong>买卖规则与账户配置</strong>
+              <em>异动确认后如何成交、出场和计入资金曲线</em>
             </div>
             <div className="backtest-form-grid">
               <label className="field wide">
-                <span>信号池</span>
+                <span>异动表</span>
                 <select value={form.signalSetId} onChange={(event) => updateForm("signalSetId", event.target.value)}>
-                  {signalSets.length === 0 ? (
-                    <option value="">暂无信号池</option>
+                  {favoriteSignalSets.length === 0 ? (
+                    <option value="">暂无异动表</option>
                   ) : (
-                    signalSets.map((signalSet) => (
+                    favoriteSignalSets.map((signalSet) => (
                       <option key={signalSet.id} value={signalSet.id}>
-                        {signalSet.name} ({signalSet.summary?.event_count ?? 0} 个信号)
+                        {signalSet.name} ({signalSet.summary?.event_count ?? 0} 个异动)
                       </option>
                     ))
                   )}
@@ -1649,8 +1729,8 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
               <label className="field wide">
                 <span>入场规则</span>
                 <select value={form.entryRule} onChange={(event) => updateForm("entryRule", event.target.value)}>
-                  <option value="consecutive_green_bars">信号后连续N根阳线，再下一根开盘</option>
-                  <option value="next_bar_open">信号确认后下一根开盘</option>
+                  <option value="consecutive_green_bars">异动确认后连续N根阳线，再下一根开盘</option>
+                  <option value="next_bar_open">异动确认后下一根开盘</option>
                 </select>
               </label>
               <label className="field">
@@ -1703,75 +1783,19 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
             </div>
             <div className="backtest-form-actions">
               <p className="backtest-hint">
-                v001 默认：1H候选后60分钟内，5m连续2根阳线且单根≥2%，下一根开盘做空，持仓440分钟，15%止损。
+                默认：异动确认后60分钟内，5m连续2根阳线且单根≥2%，下一根开盘做空，持仓440分钟，15%止损。
               </p>
-              <button className="primary-action" disabled={running || !form.signalSetId} type="submit">
+              <button className="primary-action" disabled={running || !canStartBacktest} type="submit">
                 {running ? "回测中..." : "开始规则回测"}
               </button>
             </div>
           </form>
-
-          {selectedSignalSet && (
-            <div className="backtest-card signal-set-preview">
-              <div className="backtest-card-head">
-                <span className="eyebrow">Signal Pool</span>
-                <strong>{selectedSignalSet.name}</strong>
-                <em>{runStatusLabel(selectedSignalSet.status)} · {formatDateTime(selectedSignalSet.created_at)}</em>
-              </div>
-              <div className="signal-set-stats">
-                <span>信号 <b>{selectedSignalSummary?.event_count ?? 0}</b></span>
-                <span>唯一合约 <b>{selectedSignalSummary?.unique_contracts ?? 0}</b></span>
-                <span>检查点 <b>{selectedSignalSummary?.checkpoint_count ?? 0}</b></span>
-                <span>区间 <b>{selectedSignalSummary?.start_date ?? "--"} ~ {selectedSignalSummary?.end_date ?? "--"}</b></span>
-                <span>首个确认 <b>{selectedSignalSummary?.first_confirm_time ?? "--"}</b></span>
-                <span>最后确认 <b>{selectedSignalSummary?.last_confirm_time ?? "--"}</b></span>
-              </div>
-              <div className="signal-event-list">
-                {loadingEvents ? (
-                  <span>加载信号明细...</span>
-                ) : signalEvents.length === 0 ? (
-                  <span>这个信号池还没有命中的信号。</span>
-                ) : (
-                  signalEvents.slice(0, 12).map((event) => (
-                    <span key={event.id}>
-                      <b>{event.inst_id}</b> · {event.confirm_time} · 强度 {formatOptionalNumber(event.strength)}
-                    </span>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
         </div>
 
-        <aside className="backtest-side-stack">
+        <aside className="backtest-history-stack">
           <div className="backtest-card backtest-runs">
             <div className="backtest-card-head">
-              <span className="eyebrow">SQLite Signals</span>
-              <strong>最近信号池</strong>
-            </div>
-            {signalSets.length === 0 ? (
-              <EmptyState title="暂无信号池" text="先用收藏条件生成候选信号池。" />
-            ) : (
-              <div className="backtest-run-list signal-set-list">
-                {signalSets.map((signalSet) => (
-                  <button
-                    className={form.signalSetId === signalSet.id ? "active" : ""}
-                    disabled={loadingSignalSets}
-                    key={signalSet.id}
-                    onClick={() => updateForm("signalSetId", signalSet.id)}
-                  >
-                    <strong>{signalSet.name}</strong>
-                    <span>{runStatusLabel(signalSet.status)} · {formatDateTime(signalSet.created_at)}</span>
-                    <em>{signalSet.summary?.event_count ?? 0} 信号 / {signalSet.summary?.unique_contracts ?? 0} 合约</em>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="backtest-card backtest-runs">
-            <div className="backtest-card-head">
-              <span className="eyebrow">SQLite Runs</span>
+              <span className="eyebrow">History</span>
               <strong>最近回测</strong>
             </div>
             {runs.length === 0 ? (
@@ -1801,27 +1825,32 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       </div>
 
       {error && <div className="inline-error backtest-error">{error}</div>}
-      {generatingSignalSet && <EmptyState title="正在生成信号池" text="逐个检查收藏条件命中，脚本指标会按日期缓存。" />}
-      {running && <EmptyState title="正在回测" text="先从信号池寻找入场，再按止损和到期规则模拟出场。" />}
+      {generatingSignalSet && <EmptyState title="正在生成异动信号表" text="逐个历史时刻检查收藏条件命中，脚本指标会按日期缓存。" />}
+      {running && <EmptyState title="正在回测" text="先从异动表寻找入场，再按止损和到期规则模拟出场。" />}
 
       {summaryStats && (
         <>
+          <div className="backtest-section-head">
+            <span className="eyebrow">Step 4</span>
+            <strong>回测结果</strong>
+            <em>成交记录、执行诊断和账户每日权益曲线</em>
+          </div>
           <div className="backtest-summary-grid">
             <BacktestStat label="总收益" value={`${formatSignedNumber(summaryStats.total_pnl)}U`} tone={numberTone(summaryStats.total_pnl)} />
             <BacktestStat label="收益率" value={formatPercent(summaryStats.total_return_pct)} tone={numberTone(summaryStats.total_return_pct)} />
             <BacktestStat label="交易数" value={`${summaryStats.total_trades}`} />
             <BacktestStat label="胜率" value={formatPercent(summaryStats.win_rate)} />
             <BacktestStat label="最大回撤" value={formatPercent(summaryStats.max_drawdown_pct)} tone={summaryStats.max_drawdown_pct < 0 ? "down" : ""} />
-            <BacktestStat label="信号命中" value={`${summaryStats.matched_signals}`} />
+            <BacktestStat label="异动命中" value={`${summaryStats.matched_signals}`} />
           </div>
 
           <div className="backtest-result-grid">
             <div className="backtest-card">
               <div className="backtest-card-head">
                 <span className="eyebrow">Equity</span>
-                <strong>资金曲线</strong>
+                <strong>账户每日权益曲线</strong>
               </div>
-              <BacktestEquityChart points={result?.equity ?? []} />
+              <BacktestEquityChart points={equityPoints} />
             </div>
             <div className="backtest-card backtest-diagnostics">
               <div className="backtest-card-head">
@@ -1856,7 +1885,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                     <th>#</th>
                     <th>合约</th>
                     <th>方向</th>
-                    <th>信号确认</th>
+                    <th>异动确认</th>
                     <th>入场</th>
                     <th>出场</th>
                     <th>入场价</th>
@@ -1906,13 +1935,13 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
           {checkpoints.length > 0 && (
             <div className="backtest-card checkpoint-strip">
               <div className="backtest-card-head">
-                <span className="eyebrow">Signals</span>
-                <strong>最近信号检查点</strong>
+                <span className="eyebrow">Anomaly</span>
+                <strong>最近异动检查点</strong>
               </div>
               <div>
                 {checkpoints.slice(-12).map((checkpoint) => (
                   <span key={`${checkpoint.date}-${checkpoint.as_of_ts}`}>
-                    {checkpoint.signal_time} · 命中{checkpoint.matched_count} · 开仓{checkpoint.opened_count}
+                    {checkpoint.signal_time} · 异动{checkpoint.matched_count} · 开仓{checkpoint.opened_count}
                   </span>
                 ))}
               </div>
@@ -1951,8 +1980,8 @@ function BacktestStat({ label, value, tone = "" }: { label: string; value: strin
 }
 
 function BacktestEquityChart({ points }: { points: Array<{ time: string | null; equity: number; drawdown_pct: number }> }) {
-  if (points.length < 2) {
-    return <EmptyState title="暂无资金曲线" text="有平仓交易后才会形成资金曲线。" />;
+  if (points.length === 0) {
+    return <EmptyState title="暂无账户曲线" text="生成回测结果后，会按每日权益展示账户变化。" />;
   }
   const width = 760;
   const height = 260;
@@ -1968,12 +1997,12 @@ function BacktestEquityChart({ points }: { points: Array<{ time: string | null; 
 
   return (
     <div className="backtest-equity-chart">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="回测资金曲线">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="账户每日权益曲线">
         <rect x="0" y="0" width={width} height={height} rx="14" />
-        {[minEquity, (minEquity + maxEquity) / 2, maxEquity].map((value) => {
+        {[minEquity, (minEquity + maxEquity) / 2, maxEquity].map((value, index) => {
           const y = yFor(value);
           return (
-            <g key={value}>
+            <g key={`${index}-${value}`}>
               <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} />
               <text x={padding.left - 10} y={y + 4}>{formatNumber(value)}</text>
             </g>

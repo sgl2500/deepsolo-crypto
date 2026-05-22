@@ -427,7 +427,7 @@ def create_signal_set(payload: SignalSetCreateRequest) -> dict:
 def signal_set(signal_set_id: str) -> dict:
     item = signal_pool_service.get_signal_set(signal_set_id)
     if not item:
-        raise HTTPException(status_code=404, detail=f"信号池不存在：{signal_set_id}")
+        raise HTTPException(status_code=404, detail=f"异动表不存在：{signal_set_id}")
     return item
 
 

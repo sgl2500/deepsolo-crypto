@@ -64,7 +64,7 @@ class SignalPoolService:
         config = self._normalize_signal_config(payload, favorite)
         signal_set_id = uuid.uuid4().hex
         now = _now_ms()
-        name = config.get("name") or f"{favorite['name']} 信号池 {config['start_date']}~{config['end_date']}"
+        name = config.get("name") or f"{favorite['name']} 异动表 {config['start_date']}~{config['end_date']}"
 
         with self._connect() as conn:
             conn.execute(
@@ -141,7 +141,7 @@ class SignalPoolService:
 
         item = self.get_signal_set(signal_set_id)
         if item is None:
-            raise RuntimeError("信号池记录写入失败")
+            raise RuntimeError("异动表记录写入失败")
         return item
 
     def list_signal_sets(self) -> list[dict[str, Any]]:
@@ -178,7 +178,7 @@ class SignalPoolService:
     def create_backtest_from_signal_set(self, payload: dict[str, Any]) -> dict[str, Any]:
         signal_set = self._require_signal_set(str(payload.get("signal_set_id") or ""))
         if signal_set.get("status") != "completed":
-            raise ValueError("只能对已完成的信号池做回测")
+            raise ValueError("只能对已完成的异动表做回测")
         config = self._normalize_backtest_config(payload, signal_set)
         events = self._events_for_signal_set(signal_set["id"], limit=None)
         run_id = uuid.uuid4().hex
@@ -250,7 +250,7 @@ class SignalPoolService:
         started = time.perf_counter()
         checkpoints = self._checkpoints(config)
         if not checkpoints:
-            raise ValueError("信号区间内没有可用 K 线检查点")
+            raise ValueError("异动扫描区间内没有可用 K 线检查点")
 
         metadata_filters = _favorite_metadata_filters(favorite)
         script_cache: dict[tuple[str, str, str], dict[str, list[dict[str, str]]]] = {}
@@ -363,7 +363,7 @@ class SignalPoolService:
         period_ms = _period_ms(signal_timeframe)
         dates = [item for item in _available_dates(signal_timeframe) if config["start_date"] <= item <= config["end_date"]]
         if not dates:
-            raise ValueError("信号区间内没有可用 K 线日期")
+            raise ValueError("异动扫描区间内没有可用 K 线日期")
 
         events: list[dict[str, Any]] = []
         checkpoint_count = 0
@@ -381,7 +381,7 @@ class SignalPoolService:
                 detail = result.get("stderr") or "脚本指标运行超时"
                 raise TimeoutError(f"{indicator.get('name_zh') or indicator_id}：{detail}")
             if not result.get("success"):
-                detail = result.get("stderr") or "脚本执行失败，无法生成信号池"
+                detail = result.get("stderr") or "脚本执行失败，无法生成异动表"
                 raise ValueError(f"{indicator.get('name_zh') or indicator_id}：{detail}")
 
             rows = result.get("rows", []) or []
@@ -564,11 +564,12 @@ class SignalPoolService:
             opened_by_confirm[int(candidate.event["confirm_ts"])] = opened_by_confirm.get(int(candidate.event["confirm_ts"]), 0) + 1
 
         checkpoints = self._backtest_checkpoints(events, opened_by_confirm)
-        summary, equity = self._summarize(config, signal_set, counters, trades)
+        summary, equity, daily_equity = self._summarize(config, signal_set, counters, trades)
         summary["duration_ms"] = int((time.perf_counter() - started) * 1000)
         return {
             "summary": summary,
             "equity": equity,
+            "daily_equity": daily_equity,
             "trades": trades,
             "checkpoints": checkpoints,
             "favorite": signal_set.get("favorite"),
@@ -601,7 +602,7 @@ class SignalPoolService:
                 entry_bar=entry_bar,
                 trigger_pct=[],
                 delay_min=_round((entry_bar.ts - confirm_ts) / MINUTE_MS, 4),
-                entry_reason="信号确认后下一根K线开盘",
+                entry_reason="异动确认后下一根K线开盘",
             )
 
         if entry_rule != "consecutive_green_bars":
@@ -774,7 +775,7 @@ class SignalPoolService:
         signal_set: dict[str, Any],
         counters: dict[str, int],
         trades: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         sorted_trades = sorted(trades, key=lambda item: (int(item["exit_ts"]), int(item["id"])))
         initial_capital = float(config["position_usdt"]) * int(config["max_positions"])
         equity_value = initial_capital
@@ -849,7 +850,58 @@ class SignalPoolService:
             "fee_bps_per_side": config["fee_bps_per_side"],
             "slippage_bps_per_side": config["slippage_bps_per_side"],
         }
-        return summary, equity
+        daily_equity = self._daily_equity_curve(
+            initial_capital=initial_capital,
+            sorted_trades=sorted_trades,
+            start_date=str(signal_set["config"].get("start_date") or ""),
+            end_date=str(signal_set["config"].get("end_date") or ""),
+        )
+        return summary, equity, daily_equity
+
+    def _daily_equity_curve(
+        self,
+        *,
+        initial_capital: float,
+        sorted_trades: list[dict[str, Any]],
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            cursor = Date.fromisoformat(start_date)
+            end = Date.fromisoformat(end_date)
+        except ValueError:
+            return []
+
+        pnl_by_date: dict[Date, float] = {}
+        for trade in sorted_trades:
+            exit_date_text = str(trade.get("exit_time") or "")[:10]
+            try:
+                exit_date = Date.fromisoformat(exit_date_text)
+            except ValueError:
+                continue
+            pnl_by_date[exit_date] = pnl_by_date.get(exit_date, 0.0) + float(trade.get("pnl_usdt") or 0)
+            if exit_date > end:
+                end = exit_date
+
+        total_pnl = 0.0
+        peak = initial_capital
+        points: list[dict[str, Any]] = []
+        while cursor <= end:
+            total_pnl += pnl_by_date.get(cursor, 0.0)
+            equity_value = initial_capital + total_pnl
+            peak = max(peak, equity_value)
+            drawdown_pct = (equity_value / peak - 1) * 100 if peak else 0.0
+            points.append(
+                {
+                    "ts": None,
+                    "time": cursor.isoformat(),
+                    "equity": _round(equity_value, 4),
+                    "pnl_usdt": _round(total_pnl, 4),
+                    "drawdown_pct": _round(drawdown_pct, 4),
+                }
+            )
+            cursor += timedelta(days=1)
+        return points
 
     def _backtest_checkpoints(self, events: list[dict[str, Any]], opened_by_confirm: dict[int, int]) -> list[dict[str, Any]]:
         grouped: dict[int, dict[str, Any]] = {}
@@ -898,7 +950,7 @@ class SignalPoolService:
         checkpoint_limit = int(config.get("checkpoint_limit") or MAX_CHECKPOINTS)
         if len(checkpoints) > checkpoint_limit:
             raise ValueError(
-                f"信号检查点过多：{len(checkpoints)} 个，当前上限 {checkpoint_limit}；请缩短日期区间或改为每日一次。"
+                f"异动扫描检查点过多：{len(checkpoints)} 个，当前上限 {checkpoint_limit}；请缩短日期区间或改为每日一次。"
             )
         return checkpoints
 
@@ -970,10 +1022,10 @@ class SignalPoolService:
     def _require_signal_set(self, signal_set_id: str) -> dict[str, Any]:
         normalized = str(signal_set_id or "").strip()
         if not normalized:
-            raise ValueError("请选择信号池")
+            raise ValueError("请选择异动表")
         item = self.get_signal_set(normalized)
         if item is None:
-            raise KeyError(f"信号池不存在：{normalized}")
+            raise KeyError(f"异动表不存在：{normalized}")
         return item
 
     def _normalize_signal_config(self, payload: dict[str, Any], favorite: dict[str, Any]) -> dict[str, Any]:
@@ -985,10 +1037,10 @@ class SignalPoolService:
         if signal_mode == "hourly":
             signal_mode = "each_bar_close"
         if signal_mode not in {"daily", "each_bar_close"}:
-            raise ValueError("信号频率只支持 daily 或 each_bar_close")
+            raise ValueError("异动扫描频率只支持 daily 或 each_bar_close")
         signal_timeframe = _normalize_timeframe(str(payload.get("signal_timeframe") or favorite.get("timeframe") or "1H"))
         if signal_mode == "each_bar_close" and _period_ms(signal_timeframe) >= 24 * 60 * 60 * 1000:
-            raise ValueError("逐根K线信号不支持日线周期，请选择 1H/5m/1m 或改为每日一次")
+            raise ValueError("逐根K线扫描不支持日线周期，请选择 1H/5m/1m 或改为每日一次")
         return {
             "favorite_id": favorite["id"],
             "favorite_name": favorite["name"],

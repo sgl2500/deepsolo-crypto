@@ -137,7 +137,7 @@ class BacktestService:
         entry_timeframe = config["entry_timeframe"]
         checkpoints = self._checkpoints(config)
         if not checkpoints:
-            raise ValueError("回测区间内没有可用信号 K 线")
+            raise ValueError("回测区间内没有可用异动扫描 K 线")
 
         trade_dates = self._trade_dates(
             entry_timeframe,
@@ -415,7 +415,7 @@ class BacktestService:
         checkpoint_limit = int(config.get("checkpoint_limit") or MAX_CHECKPOINTS)
         if len(checkpoints) > checkpoint_limit:
             raise ValueError(
-                f"信号检查点过多：{len(checkpoints)} 个，当前上限 {checkpoint_limit}；请缩短日期区间或改为每日一次。"
+                f"异动扫描检查点过多：{len(checkpoints)} 个，当前上限 {checkpoint_limit}；请缩短日期区间或改为每日一次。"
             )
         return checkpoints
 
@@ -468,12 +468,12 @@ class BacktestService:
         if signal_mode == "hourly":
             signal_mode = "each_bar_close"
         if signal_mode not in {"daily", "each_bar_close"}:
-            raise ValueError("信号频率只支持 daily 或 each_bar_close")
+            raise ValueError("异动扫描频率只支持 daily 或 each_bar_close")
 
         signal_timeframe = _normalize_timeframe(str(payload.get("signal_timeframe") or favorite.get("timeframe") or "1H"))
         entry_timeframe = _normalize_timeframe(str(payload.get("entry_timeframe") or "1m"))
         if signal_mode == "each_bar_close" and _period_ms(signal_timeframe) >= 24 * 60 * 60 * 1000:
-            raise ValueError("逐根K线信号不支持日线周期，请选择 1H/5m/1m 或改为每日一次")
+            raise ValueError("逐根K线扫描不支持日线周期，请选择 1H/5m/1m 或改为每日一次")
 
         return {
             "favorite_id": favorite["id"],
@@ -529,8 +529,10 @@ class BacktestService:
             result = {
                 "summary": result.get("summary"),
                 "equity": (result.get("equity") or [])[-30:],
+                "daily_equity": (result.get("daily_equity") or result.get("equity") or [])[-30:],
                 "trades": [],
                 "favorite": result.get("favorite"),
+                "signal_set": result.get("signal_set"),
             }
         return {
             "id": row["id"],

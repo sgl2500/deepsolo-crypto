@@ -624,6 +624,7 @@ export type BacktestCheckpoint = {
 export type BacktestResult = {
   summary: BacktestSummary;
   equity: BacktestEquityPoint[];
+  daily_equity?: BacktestEquityPoint[];
   trades: BacktestTrade[];
   checkpoints: BacktestCheckpoint[];
   favorite?: {
@@ -893,7 +894,7 @@ export async function createSignalSet(payload: SignalSetCreateRequest): Promise<
     },
     {
       timeoutMs: 120_000,
-      timeoutMessage: "信号池生成超时：超过 120 秒还没有返回，请缩短区间或改为每日一次信号。",
+      timeoutMessage: "异动表生成超时：超过 120 秒还没有返回，请缩短区间或改为每日一次扫描。",
     },
   );
 }
@@ -916,7 +917,7 @@ export async function createBacktestRun(payload: BacktestRunRequest): Promise<Ba
     },
     {
       timeoutMs: 120_000,
-      timeoutMessage: "回测请求超时：超过 120 秒还没有返回，请缩短日期区间或改成每日一次信号。",
+      timeoutMessage: "回测请求超时：超过 120 秒还没有返回，请缩短日期区间或改成每日一次扫描。",
     },
   );
 }
@@ -931,7 +932,7 @@ export async function createBacktestRunFromSignalSet(payload: SignalSetBacktestR
     },
     {
       timeoutMs: 120_000,
-      timeoutMessage: "基于信号池的回测请求超时：超过 120 秒还没有返回，请缩短信号池区间或降低信号数量。",
+      timeoutMessage: "基于异动表的回测请求超时：超过 120 秒还没有返回，请缩短区间或降低异动数量。",
     },
   );
 }
