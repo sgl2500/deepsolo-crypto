@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from .config import APP_TIMEZONE, DATA_ROOT, TIMEFRAMES
 
+SUMMARY_DATE_LIMIT = 365
+
 
 @dataclass(frozen=True)
 class DatePartition:
@@ -58,7 +60,7 @@ class DataSourceService:
                     "recommended_file_count": recommended_files,
                     "dates": [
                         {"date": item.date, "file_count": item.file_count}
-                        for item in partitions[-45:]
+                        for item in partitions[-SUMMARY_DATE_LIMIT:]
                     ],
                 }
             )

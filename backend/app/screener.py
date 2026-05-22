@@ -11,7 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 from bisect import bisect_left
 
-from .config import APP_TIMEZONE
+from .config import APP_TIMEZONE, TIMEFRAMES
 from .data_source import data_source_service
 from .indicator_repository import indicator_repository
 from . import script_indicator_service
@@ -563,14 +563,18 @@ def _period_step_minutes(period: str) -> int | None:
 
 
 def _available_dates(period: str) -> list[str]:
-    summary = data_source_service.summary()
-    tf = next(
-        (item for item in summary.get("timeframes", []) if str(item.get("key", "")).lower() == period.lower()),
-        None,
-    )
-    if not tf:
+    timeframe_key = next((key for key in TIMEFRAMES if key.lower() == period.lower()), None)
+    if not timeframe_key:
         return []
-    return sorted(str(item.get("date")) for item in tf.get("dates", []) if item.get("date"))
+    tf_dir = data_source_service.root / TIMEFRAMES[timeframe_key]
+    if not tf_dir.exists():
+        return []
+
+    dates: list[str] = []
+    for entry in tf_dir.iterdir():
+        if entry.is_dir() and entry.name.startswith("date="):
+            dates.append(entry.name.split("date=", 1)[1])
+    return sorted(dates)
 
 
 def _positive_int(value: Any, default: int) -> int:

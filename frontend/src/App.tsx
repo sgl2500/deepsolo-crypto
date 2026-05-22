@@ -3905,7 +3905,7 @@ function suggestedBacktestRange(summary: DataSummary | null, period: string, mod
   if (rows.length === 0) return { start: end, end };
   const endIndex = rows.findIndex((item) => item.date === end);
   const fallbackEndIndex = endIndex >= 0 ? endIndex : rows.length - 1;
-  const span = mode === "each_bar_close" ? 3 : 14;
+  const span = mode === "each_bar_close" ? 14 : 180;
   const startIndex = Math.max(0, fallbackEndIndex - span + 1);
   return {
     start: rows[startIndex]?.date ?? end,
