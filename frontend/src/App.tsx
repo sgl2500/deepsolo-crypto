@@ -24,6 +24,7 @@ import {
   ScreenerMetadataFilterPayload,
   ScreenerResponse,
   ScreenerRow,
+  ScreenerTimeCountItem,
   createBacktestRunFromSignalSet,
   createScreenerFavorite,
   createSignalSet,
@@ -45,6 +46,7 @@ import {
   fetchSignalSetEvents,
   fetchSignalSets,
   fetchScriptWorkspace,
+  fetchScreenerTimeCounts,
   fetchSummary,
   generateScriptWithAi,
   queryScreener,
@@ -160,11 +162,14 @@ export default function App() {
   const [editingCondition, setEditingCondition] = useState<MetadataCondition | null>(null);
   const [tableSearch, setTableSearch] = useState("");
   const [asOfTime, setAsOfTime] = useState("00:00");
+  const [baselineTimeCounts, setBaselineTimeCounts] = useState<ScreenerTimeCountItem[]>([]);
+  const [baselineCountsLoading, setBaselineCountsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const timeStripRef = useRef<HTMLDivElement | null>(null);
   const queryRunRef = useRef(0);
+  const baselineCountsRunRef = useRef(0);
 
   useEffect(() => {
     void loadSummary();
@@ -206,6 +211,17 @@ export default function App() {
     () => uniqueValueConditions(metadataConditions, date, dates, normalizedAsOfTime),
     [metadataConditions, date, dates, normalizedAsOfTime],
   );
+
+  useEffect(() => {
+    if (!date || metadataConditions.length === 0) {
+      baselineCountsRunRef.current += 1;
+      setBaselineTimeCounts([]);
+      setBaselineCountsLoading(false);
+      return;
+    }
+    void loadBaselineTimeCounts();
+  }, [date, timeframe, metadataConditions, minRet15m, minVolRatio60, minVolQuote15m, sortBy]);
+
   const visibleRows = useMemo(() => {
     const needle = tableSearch.trim().toLowerCase();
     if (!needle) return rows;
@@ -448,6 +464,33 @@ export default function App() {
     }
   }
 
+  async function loadBaselineTimeCounts() {
+    if (!date || metadataConditions.length === 0) return;
+    const runId = baselineCountsRunRef.current + 1;
+    baselineCountsRunRef.current = runId;
+    setBaselineCountsLoading(true);
+    try {
+      const data = await fetchScreenerTimeCounts({
+        timeframe,
+        date,
+        minRet15m,
+        minVolRatio60,
+        minVolQuote15m,
+        sortBy,
+        metadataFilters: metadataConditions.map(toMetadataFilterPayload),
+      });
+      if (runId !== baselineCountsRunRef.current) return;
+      setBaselineTimeCounts(data.items);
+    } catch (err) {
+      if (runId !== baselineCountsRunRef.current) return;
+      setBaselineTimeCounts([]);
+    } finally {
+      if (runId === baselineCountsRunRef.current) {
+        setBaselineCountsLoading(false);
+      }
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -577,20 +620,13 @@ export default function App() {
                   )}
                   <button disabled={!nextDate} onClick={() => nextDate && setDate(nextDate.date)}>›</button>
                 </div>
-                <div className="asof-time-control">
-                  <label htmlFor="screener-asof-time">选币基准时间</label>
-                  <div className="asof-time-input-row">
-                    <BaselineTimePicker
-                      id="screener-asof-time"
-                      value={normalizedAsOfTime}
-                      timeframe={timeframe}
-                      onChange={setAsOfTime}
-                    />
-                  </div>
-                  <small className={asOfTimeError ? "error" : ""}>
-                    {asOfTimeError || (result?.as_of_label ? `实际使用 ${result.as_of_label}` : `将使用 ${date || "--"} ${normalizedAsOfTime}`)}
-                  </small>
-                </div>
+                <BaselineHourStrip
+                  value={normalizedAsOfTime}
+                  timeframe={timeframe}
+                  counts={baselineTimeCounts}
+                  loading={baselineCountsLoading}
+                  onChange={setAsOfTime}
+                />
               </div>
 
               <section className="terminal-table-panel focused-table-panel">
@@ -725,86 +761,52 @@ function TableColumnHead({
   );
 }
 
-function BaselineTimePicker({
-  id,
+function BaselineHourStrip({
   value,
   timeframe,
+  counts,
+  loading,
   onChange,
 }: {
-  id: string;
   value: string;
   timeframe: string;
+  counts: ScreenerTimeCountItem[];
+  loading: boolean;
   onChange: (value: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
   const normalized = normalizeBaselineTimeForPeriod(timeframe, value);
-  const [hour, minute] = baselineTimeParts(normalized);
-  const hourOptions = metadataPeriodAllowsTime(timeframe) ? Array.from({ length: 24 }, (_, index) => index) : [0];
-  const minuteOptions = baselineMinuteOptions(timeframe);
-  const minuteLocked = minuteOptions.length <= 1;
-
-  useEffect(() => {
-    function closeOnOutside(event: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    }
-    if (open) document.addEventListener("mousedown", closeOnOutside);
-    return () => document.removeEventListener("mousedown", closeOnOutside);
-  }, [open]);
-
-  function pick(nextHour: number, nextMinute: number) {
-    const alignedMinute = minuteOptions.includes(nextMinute) ? nextMinute : minuteOptions[0] ?? 0;
-    onChange(formatTimeParts(nextHour, alignedMinute));
-  }
+  const [activeHour] = baselineTimeParts(normalized);
+  const hours = baselineHourOptions(timeframe);
+  const countsByTime = new Map(counts.map((item) => [item.time, item]));
 
   return (
-    <div className="baseline-time-picker" ref={rootRef}>
-      <button
-        id={id}
-        type="button"
-        className="baseline-time-trigger"
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span>{normalized}</span>
-        <em>滚动选择</em>
-      </button>
-      {open && (
-        <div className="baseline-time-popover">
-          <div className="time-wheel-column">
-            <strong>时</strong>
-            <div className="time-wheel-list">
-              {hourOptions.map((item) => (
-                <button
-                  type="button"
-                  key={item}
-                  className={item === hour ? "active" : ""}
-                  onClick={() => pick(item, minute)}
-                >
-                  {String(item).padStart(2, "0")}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className={minuteLocked ? "time-wheel-column locked" : "time-wheel-column"}>
-            <strong>分</strong>
-            <div className="time-wheel-list">
-              {minuteOptions.map((item) => (
-                <button
-                  type="button"
-                  key={item}
-                  className={item === minute ? "active" : ""}
-                  disabled={minuteLocked}
-                  onClick={() => pick(hour, item)}
-                >
-                  {String(item).padStart(2, "0")}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+    <div className="baseline-hour-control">
+      <div className="baseline-hour-strip" role="list" aria-label="选择整点基准时间">
+        {hours.map((hour) => {
+          const timeText = formatTimeParts(hour, 0);
+          const item = countsByTime.get(timeText);
+          const count = item?.matched_count;
+          const countLabel = loading ? "..." : typeof count === "number" ? String(count) : "--";
+          const className = [
+            "baseline-hour-item",
+            hour === activeHour ? "active" : "",
+            typeof count === "number" && count > 0 ? "has-hit" : "",
+          ].filter(Boolean).join(" ");
+          return (
+            <button
+              type="button"
+              role="listitem"
+              key={timeText}
+              className={className}
+              title={`${timeText} 选出 ${countLabel} 个合约`}
+              onClick={() => onChange(timeText)}
+            >
+              <b>{timeText}</b>
+              <span>{countLabel}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -4274,6 +4276,10 @@ function baselineMinuteOptions(period: string) {
   if (step === null || step >= 60) return [0];
   const safeStep = Math.max(1, step);
   return Array.from({ length: Math.ceil(60 / safeStep) }, (_, index) => index * safeStep).filter((item) => item < 60);
+}
+
+function baselineHourOptions(period: string) {
+  return metadataPeriodAllowsTime(period) ? Array.from({ length: 24 }, (_, index) => index) : [0];
 }
 
 function formatTimeParts(hour: number, minute: number) {

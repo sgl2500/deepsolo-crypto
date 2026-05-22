@@ -46,6 +46,24 @@ export type ScreenerResponse = {
   message?: string;
 };
 
+export type ScreenerTimeCountItem = {
+  time: string;
+  as_of: string;
+  date: string | null;
+  as_of_label: string | null;
+  total_contracts: number;
+  matched_count: number;
+  duration_ms: number;
+};
+
+export type ScreenerTimeCountsResponse = {
+  timeframe: string;
+  date: string | null;
+  duration_ms: number;
+  items: ScreenerTimeCountItem[];
+  message?: string;
+};
+
 export type ScreenerMetadataFilterPayload = {
   indicator_id: string;
   operator: string;
@@ -943,6 +961,31 @@ export async function queryScreener(params: {
   return request(`/api/screener/query?${search.toString()}`, undefined, {
     timeoutMs: 45_000,
     timeoutMessage: "选币接口请求超时：超过 45 秒还没有返回，请检查脚本指标是否过慢或数据量过大。",
+  });
+}
+
+export async function fetchScreenerTimeCounts(params: {
+  timeframe: string;
+  date?: string;
+  minRet15m?: string;
+  minVolRatio60?: string;
+  minVolQuote15m?: string;
+  sortBy?: string;
+  metadataFilters?: ScreenerMetadataFilterPayload[];
+}): Promise<ScreenerTimeCountsResponse> {
+  const search = new URLSearchParams();
+  search.set("timeframe", params.timeframe);
+  if (params.date) search.set("date", params.date);
+  if (params.minRet15m) search.set("min_ret_15m", params.minRet15m);
+  if (params.minVolRatio60) search.set("min_vol_ratio_60", params.minVolRatio60);
+  if (params.minVolQuote15m) search.set("min_vol_quote_15m", params.minVolQuote15m);
+  if (params.sortBy) search.set("sort_by", params.sortBy);
+  if (params.metadataFilters?.length) {
+    search.set("metadata_filters", JSON.stringify(params.metadataFilters));
+  }
+  return request(`/api/screener/time-counts?${search.toString()}`, undefined, {
+    timeoutMs: 90_000,
+    timeoutMessage: "整点命中数请求超时：超过 90 秒还没有返回，请检查脚本指标是否过慢。",
   });
 }
 

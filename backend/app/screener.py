@@ -149,6 +149,63 @@ def query_screener(
     }
 
 
+def query_screener_time_counts(
+    timeframe: str = "1m",
+    date: str | None = None,
+    min_ret_15m: float | None = None,
+    min_vol_ratio_60: float | None = None,
+    min_vol_quote_15m: float | None = None,
+    sort_by: str = "ret_15m",
+    sort_dir: str = "desc",
+    metadata_filters: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    selected_date = date or data_source_service.default_date(timeframe)
+    if not selected_date:
+        return {
+            "timeframe": timeframe,
+            "date": date,
+            "duration_ms": 0,
+            "items": [],
+            "message": "No data partition found.",
+        }
+
+    script_values_cache: dict[tuple[str, str, str], dict[str, list[dict[str, str]]]] = {}
+    items: list[dict[str, Any]] = []
+    for hour in _baseline_hours(timeframe):
+        time_text = f"{hour:02d}:00"
+        as_of = f"{selected_date}T{time_text}:00"
+        result = query_screener(
+            timeframe=timeframe,
+            date=selected_date,
+            as_of=as_of,
+            min_ret_15m=min_ret_15m,
+            min_vol_ratio_60=min_vol_ratio_60,
+            min_vol_quote_15m=min_vol_quote_15m,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            metadata_filters=metadata_filters,
+            limit=1,
+            script_values_cache=script_values_cache,
+        )
+        items.append({
+            "time": time_text,
+            "as_of": as_of,
+            "date": result.get("date"),
+            "as_of_label": result.get("as_of_label"),
+            "total_contracts": result.get("total_contracts", 0),
+            "matched_count": result.get("matched_count", 0),
+            "duration_ms": result.get("duration_ms", 0),
+        })
+
+    return {
+        "timeframe": timeframe,
+        "date": selected_date,
+        "duration_ms": int((time.perf_counter() - started) * 1000),
+        "items": items,
+    }
+
+
 def builtin_indicators() -> list[dict[str, str]]:
     return [
         {"key": "ret_15m", "name": "近15分钟涨幅", "unit": "%", "type": "number"},
@@ -636,6 +693,12 @@ def _period_step_minutes(period: str) -> int | None:
     if unit == "d":
         return None
     return 1
+
+
+def _baseline_hours(period: str) -> list[int]:
+    if _period_step_minutes(period) is None:
+        return [0]
+    return list(range(24))
 
 
 def _available_dates(period: str) -> list[str]:

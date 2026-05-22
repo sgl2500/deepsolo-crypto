@@ -12,7 +12,7 @@ from .data_quality_service import data_quality_service
 from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
 from .indicator_repository import IndicatorCreate, indicator_repository
-from .screener import builtin_indicators, query_screener
+from .screener import builtin_indicators, query_screener, query_screener_time_counts
 from .signal_pool_service import signal_pool_service
 from . import contract_update_service, script_indicator_service
 
@@ -511,6 +511,43 @@ def screener_query(
             sort_dir=sort_dir,
             metadata_filters=parsed_metadata_filters,
             limit=limit,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/screener/time-counts")
+def screener_time_counts(
+    timeframe: str = "1m",
+    date: str | None = None,
+    min_ret_15m: float | None = None,
+    min_vol_ratio_60: float | None = None,
+    min_vol_quote_15m: float | None = None,
+    sort_by: str = "ret_15m",
+    sort_dir: str = "desc",
+    metadata_filters: str | None = None,
+) -> dict:
+    parsed_metadata_filters = None
+    if metadata_filters:
+        try:
+            parsed_metadata_filters = json.loads(metadata_filters)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="metadata_filters 必须是 JSON 数组") from exc
+        if not isinstance(parsed_metadata_filters, list):
+            raise HTTPException(status_code=400, detail="metadata_filters 必须是 JSON 数组")
+
+    try:
+        return query_screener_time_counts(
+            timeframe=timeframe,
+            date=date,
+            min_ret_15m=min_ret_15m,
+            min_vol_ratio_60=min_vol_ratio_60,
+            min_vol_quote_15m=min_vol_quote_15m,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            metadata_filters=parsed_metadata_filters,
         )
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
