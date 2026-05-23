@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import threading
 import time
 import uuid
 from bisect import bisect_left
@@ -65,6 +66,7 @@ class SignalPoolService:
         signal_set_id = uuid.uuid4().hex
         now = _now_ms()
         name = config.get("name") or f"{favorite['name']} 异动表 {config['start_date']}~{config['end_date']}"
+        summary = _initial_signal_summary(config)
 
         with self._connect() as conn:
             conn.execute(
@@ -81,7 +83,7 @@ class SignalPoolService:
                     "running",
                     _dump_json(config),
                     _dump_json(favorite),
-                    "",
+                    _dump_json(summary),
                     "",
                     now,
                     now,
@@ -90,8 +92,39 @@ class SignalPoolService:
             )
 
         try:
+            self._start_signal_set_job(signal_set_id, favorite, config)
+        except Exception as exc:
+            self._mark_signal_set_failed(signal_set_id, str(exc))
+
+        item = self.get_signal_set(signal_set_id)
+        if item is None:
+            raise RuntimeError("异动表记录写入失败")
+        return item
+
+    def _start_signal_set_job(
+        self,
+        signal_set_id: str,
+        favorite: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        thread = threading.Thread(
+            target=self._run_signal_set_job,
+            args=(signal_set_id, favorite, config),
+            daemon=True,
+            name=f"signal-set-{signal_set_id[:8]}",
+        )
+        thread.start()
+
+    def _run_signal_set_job(
+        self,
+        signal_set_id: str,
+        favorite: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        try:
             events, summary = self._build_signal_events(signal_set_id, favorite, config)
             with self._connect() as conn:
+                conn.execute("DELETE FROM signal_events WHERE signal_set_id = ?", (signal_set_id,))
                 conn.executemany(
                     """
                     INSERT INTO signal_events (
@@ -129,20 +162,18 @@ class SignalPoolService:
                     ("completed", _dump_json(summary), "", _now_ms(), signal_set_id),
                 )
         except Exception as exc:
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    UPDATE signal_sets
-                    SET status = ?, error = ?, finished_at = ?
-                    WHERE id = ?
-                    """,
-                    ("failed", str(exc), _now_ms(), signal_set_id),
-                )
+            self._mark_signal_set_failed(signal_set_id, str(exc))
 
-        item = self.get_signal_set(signal_set_id)
-        if item is None:
-            raise RuntimeError("异动表记录写入失败")
-        return item
+    def _mark_signal_set_failed(self, signal_set_id: str, error: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE signal_sets
+                SET status = ?, error = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                ("failed", error, _now_ms(), signal_set_id),
+            )
 
     def list_signal_sets(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -302,7 +333,12 @@ class SignalPoolService:
                 inst_id = str(row.get("inst_id") or "")
                 if not inst_id:
                     continue
-                signal_ts = _safe_int(row.get("latest_ts")) or checkpoint["as_of_ts"]
+                fallback_signal_ts = _safe_int(row.get("latest_ts")) or checkpoint["as_of_ts"]
+                signal_ts, confirm_ts = _event_signal_anchor(
+                    row,
+                    fallback_signal_ts,
+                    config["signal_timeframe"],
+                )
                 events.append(
                     {
                         "id": uuid.uuid4().hex,
@@ -312,9 +348,9 @@ class SignalPoolService:
                         "timeframe": config["signal_timeframe"],
                         "date": checkpoint["date"],
                         "signal_ts": signal_ts,
-                        "confirm_ts": checkpoint["confirm_ts"],
+                        "confirm_ts": confirm_ts,
                         "signal_time": _format_time(signal_ts),
-                        "confirm_time": _format_time(checkpoint["confirm_ts"]),
+                        "confirm_time": _format_time(confirm_ts),
                         "strength": _event_strength(row),
                         "matched_conditions": row.get("matched_conditions") or [],
                         "metadata_values": row.get("metadata_values") or {},
@@ -1175,7 +1211,7 @@ class SignalPoolService:
         }
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1203,6 +1239,14 @@ class SignalPoolService:
                 CREATE INDEX IF NOT EXISTS idx_signal_sets_created_at
                 ON signal_sets(created_at DESC)
                 """
+            )
+            conn.execute(
+                """
+                UPDATE signal_sets
+                SET status = ?, error = ?, finished_at = ?
+                WHERE status = ?
+                """,
+                ("failed", "后端服务重启，原后台任务已中断，请重新生成异动表。", _now_ms(), "running"),
             )
             conn.execute(
                 """
@@ -1260,19 +1304,62 @@ class SignalPoolService:
             )
 
 
+def _event_signal_anchor(row: dict[str, Any], fallback_ts: int, fallback_timeframe: str) -> tuple[int, int]:
+    metadata_values = row.get("metadata_values") or {}
+    anchors: list[tuple[int, int]] = []
+    if isinstance(metadata_values, dict):
+        for key, value in metadata_values.items():
+            if not str(key).endswith("::ts"):
+                continue
+            ts = _safe_int(value)
+            if ts is None:
+                continue
+            indicator_id = str(key).removesuffix("::ts")
+            indicator = indicator_repository.get(indicator_id) or {}
+            period_text = str(indicator.get("storage_period") or fallback_timeframe)
+            try:
+                period_ms = _period_ms(period_text)
+            except ValueError:
+                period_ms = _period_ms(fallback_timeframe)
+            anchors.append((ts, period_ms))
+    if not anchors:
+        return fallback_ts, fallback_ts + _period_ms(fallback_timeframe)
+    signal_ts, period_ms = max(anchors, key=lambda item: item[0])
+    return signal_ts, signal_ts + period_ms
+
+
 def _event_strength(row: dict[str, Any]) -> float:
-    candidates: list[float] = []
-    for key in ("ret_1h", "ret_15m", "amp_15m", "latest_close"):
-        value = _safe_float(row.get(key))
-        if value is not None:
-            candidates.append(value)
+    pct_candidates: list[float] = []
+    other_metadata_candidates: list[float] = []
     metadata_values = row.get("metadata_values") or {}
     if isinstance(metadata_values, dict):
-        for value in metadata_values.values():
+        for key, value in metadata_values.items():
+            if str(key).endswith("::ts"):
+                continue
             parsed = _safe_float(value)
-            if parsed is not None:
-                candidates.append(parsed)
-    return _round(max(candidates, default=0.0), 6)
+            if parsed is None:
+                continue
+            indicator_id = str(key).split("::", 1)[0]
+            indicator = indicator_repository.get(indicator_id) or {}
+            if indicator.get("unit") == "%":
+                pct_candidates.append(parsed)
+            else:
+                other_metadata_candidates.append(parsed)
+    if pct_candidates:
+        return _round(max(pct_candidates), 6)
+
+    metric_candidates: list[float] = []
+    for key in ("ret_1h", "ret_15m", "amp_15m"):
+        value = _safe_float(row.get(key))
+        if value is not None:
+            metric_candidates.append(value)
+    if metric_candidates:
+        return _round(max(metric_candidates), 6)
+    if other_metadata_candidates:
+        return _round(max(other_metadata_candidates), 6)
+
+    latest_close = _safe_float(row.get("latest_close"))
+    return _round(latest_close or 0.0, 6)
 
 
 def _signal_metrics(event: dict[str, Any]) -> dict[str, Any]:
@@ -1330,6 +1417,23 @@ def _safe_float(value: Any) -> float | None:
 
 def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _initial_signal_summary(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "start_date": config.get("start_date"),
+        "end_date": config.get("end_date"),
+        "signal_timeframe": config.get("signal_timeframe"),
+        "signal_mode": config.get("signal_mode"),
+        "checkpoint_count": 0,
+        "matched_count": 0,
+        "returned_count": 0,
+        "event_count": 0,
+        "truncated_events": 0,
+        "unique_contracts": 0,
+        "total_contracts": 0,
+        "duration_ms": 0,
+    }
 
 
 signal_pool_service = SignalPoolService()

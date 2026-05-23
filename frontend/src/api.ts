@@ -893,8 +893,8 @@ export async function createSignalSet(payload: SignalSetCreateRequest): Promise<
       body: JSON.stringify(payload),
     },
     {
-      timeoutMs: 120_000,
-      timeoutMessage: "异动表生成超时：超过 120 秒还没有返回，请缩短区间或改为每日一次扫描。",
+      timeoutMs: 30_000,
+      timeoutMessage: "异动表后台任务创建超时：超过 30 秒还没有返回，请检查后端服务是否繁忙。",
     },
   );
 }

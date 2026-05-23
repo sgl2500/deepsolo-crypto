@@ -43,6 +43,7 @@ import {
   fetchIndicatorValuePreview,
   fetchIndicators,
   fetchScreenerFavorites,
+  fetchSignalSet,
   fetchSignalSetEvents,
   fetchSignalSets,
   fetchScriptWorkspace,
@@ -1209,6 +1210,144 @@ function KlineChart({
   );
 }
 
+function AnomalyEvidenceModal({
+  event,
+  signalName,
+  target,
+  activePeriod,
+  data,
+  loading,
+  error,
+  onPeriodChange,
+  onClose,
+}: {
+  event: SignalEvent;
+  signalName: string;
+  target: { instId: string; anchorTs?: number | null };
+  activePeriod: string;
+  data: ContractKlineResponse | null;
+  loading: boolean;
+  error: string | null;
+  onPeriodChange: (period: string) => void;
+  onClose: () => void;
+}) {
+  const conditions = event.matched_conditions || [];
+
+  return (
+    <div className="modal-backdrop anomaly-detail-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="anomaly-detail-modal" role="dialog" aria-modal="true" onMouseDown={(mouseEvent) => mouseEvent.stopPropagation()}>
+        <div className="modal-head anomaly-detail-head">
+          <div>
+            <span className="eyebrow">异动证据</span>
+            <h2>{target.instId}</h2>
+            <p>这里展示生成异动表时保存的命中条件和异动K线，方便核对这条异动是不是符合预期。</p>
+          </div>
+          <button className="close-button" onClick={onClose}>×</button>
+        </div>
+
+        <div className="anomaly-detail-body">
+          <div className="anomaly-summary-grid">
+            <div>
+              <span>异动名称</span>
+              <strong>{signalName}</strong>
+            </div>
+            <div>
+              <span>异动时间</span>
+              <strong>{event.signal_time ?? "--"}</strong>
+            </div>
+            <div>
+              <span>确认时间</span>
+              <strong>{event.confirm_time ?? "--"}</strong>
+            </div>
+            <div>
+              <span>扫描周期</span>
+              <strong>{klinePeriodLabel(event.timeframe)}</strong>
+            </div>
+            <div>
+              <span>强度</span>
+              <strong>{formatOptionalNumber(event.strength)}</strong>
+            </div>
+            <div>
+              <span>交易日</span>
+              <strong>{formatDateBadge(event.date) || "--"}</strong>
+            </div>
+          </div>
+
+          <section className="anomaly-evidence-section">
+            <div className="anomaly-section-head">
+              <strong>命中条件</strong>
+              <em>{conditions.length} 条</em>
+            </div>
+            {conditions.length === 0 ? (
+              <EmptyState title="没有命中条件快照" text="这条异动没有保存 matched_conditions 字段。" />
+            ) : (
+              <div className="anomaly-condition-list">
+                {conditions.map((condition, index) => (
+                  <span key={`${condition}-${index}`}>{condition}</span>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="anomaly-evidence-section anomaly-kline-section">
+            <div className="anomaly-section-head anomaly-kline-head">
+              <div>
+                <strong>异动K线</strong>
+                <em>黄色竖线为异动时间所在K线</em>
+              </div>
+              <div className="kline-period-tabs" role="tablist" aria-label="异动K线周期">
+                {klinePeriodOptions.map((option) => (
+                  <button
+                    className={option.value === activePeriod ? "active" : ""}
+                    disabled={loading}
+                    key={option.value}
+                    onClick={() => onPeriodChange(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {loading ? (
+              <EmptyState title="正在读取异动K线" text="默认获取异动前后各 33 根 K 线。" />
+            ) : error ? (
+              <EmptyState title="异动K线加载失败" text={error} />
+            ) : data ? (
+              <>
+                <div className="kline-summary-strip anomaly-kline-summary">
+                  <div>
+                    <span>周期</span>
+                    <strong>{klinePeriodLabel(data.timeframe)}</strong>
+                  </div>
+                  <div>
+                    <span>基准日期</span>
+                    <strong>{formatDateBadge(data.date)}</strong>
+                  </div>
+                  <div>
+                    <span>基准K线</span>
+                    <strong>{data.anchor_time ?? "--"}</strong>
+                  </div>
+                  <div>
+                    <span>已返回</span>
+                    <strong>{data.returned_count} 根</strong>
+                  </div>
+                  <div>
+                    <span>前/后</span>
+                    <strong>{data.before_count}/{data.after_count}</strong>
+                  </div>
+                </div>
+                <KlineChart rows={data.rows} anchorIndex={data.anchor_index} />
+              </>
+            ) : (
+              <EmptyState title="等待异动K线" text="打开异动详情后会自动加载异动时间附近的K线。" />
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const initialRange = suggestedBacktestRange(summary, "1H", "daily");
   const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
@@ -1253,6 +1392,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const [klineLoading, setKlineLoading] = useState(false);
   const [klineError, setKlineError] = useState<string | null>(null);
   const [klineMarkers, setKlineMarkers] = useState<KlineTradeMarker[]>([]);
+  const [selectedAnomaly, setSelectedAnomaly] = useState<SignalEvent | null>(null);
 
   useEffect(() => {
     void loadFavorites();
@@ -1381,12 +1521,14 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
             : 600
           : 1500,
       });
-      setSignalSets((current) => [signalSet, ...current.filter((item) => item.id !== signalSet.id)]);
+      upsertSignalSet(signalSet);
       setForm((current) => ({ ...current, signalSetId: signalSet.id }));
       if (signalSet.status === "failed") {
         setError(signalSet.error || "异动信号生成失败");
-      } else {
+      } else if (signalSet.status === "completed") {
         void loadSignalEvents(signalSet.id);
+      } else {
+        setSignalEvents([]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "异动信号生成失败");
@@ -1442,6 +1584,15 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
+  function upsertSignalSet(signalSet: SignalSet) {
+    setSignalSets((current) => {
+      if (current.some((item) => item.id === signalSet.id)) {
+        return current.map((item) => (item.id === signalSet.id ? signalSet : item));
+      }
+      return [signalSet, ...current];
+    });
+  }
+
   function changeSignalTimeframe(value: string) {
     const nextRange = suggestedBacktestRange(summary, value, form.signalMode);
     setForm((current) => ({
@@ -1468,16 +1619,39 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     const target = { instId: trade.inst_id, anchorTs: trade.entry_ts };
     const markers = tradeKlineMarkers(trade);
     const normalizedPeriod = defaultTradeKlinePeriod(trade, period);
+    setSelectedAnomaly(null);
     setKlineTarget(target);
     setKlinePeriod(normalizedPeriod);
     setKlineMarkers(markers);
     await loadTradeKlineWindow(target, normalizedPeriod, markers);
   }
 
-  async function changeTradeKlinePeriod(period: string) {
+  async function openAnomalyDetail(event: SignalEvent) {
+    const target = { instId: event.inst_id, anchorTs: event.signal_ts };
+    const normalizedPeriod = defaultAnomalyKlinePeriod(event.timeframe || form.signalTimeframe);
+    setSelectedAnomaly(event);
+    setKlineTarget(target);
+    setKlinePeriod(normalizedPeriod);
+    setKlineMarkers([]);
+    await loadAnomalyKlineWindow(target, normalizedPeriod);
+  }
+
+  async function changeKlinePeriod(period: string) {
     if (!klineTarget) return;
     setKlinePeriod(period);
-    await loadTradeKlineWindow(klineTarget, period, klineMarkers);
+    if (selectedAnomaly) {
+      await loadAnomalyKlineWindow(klineTarget, period);
+    } else {
+      await loadTradeKlineWindow(klineTarget, period, klineMarkers);
+    }
+  }
+
+  function closeKlineModal() {
+    setKlineTarget(null);
+    setKlineData(null);
+    setKlineError(null);
+    setKlineMarkers([]);
+    setSelectedAnomaly(null);
   }
 
   async function loadTradeKlineWindow(
@@ -1505,6 +1679,29 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     }
   }
 
+  async function loadAnomalyKlineWindow(
+    target: { instId: string; anchorTs?: number | null },
+    period: string,
+  ) {
+    setKlineData(null);
+    setKlineLoading(true);
+    setKlineError(null);
+    try {
+      const data = await fetchContractKlineWindow({
+        instId: target.instId,
+        timeframe: period,
+        anchorTs: target.anchorTs,
+        before: 33,
+        after: 33,
+      });
+      setKlineData(data);
+    } catch (err) {
+      setKlineError(err instanceof Error ? err.message : "异动K线加载失败");
+    } finally {
+      setKlineLoading(false);
+    }
+  }
+
   const selectedFavorite = favorites.find((item) => item.id === form.favoriteId) ?? null;
   const favoriteSignalSets = signalSets.filter((item) => item.favorite_id === form.favoriteId);
   const selectedSignalSet = signalSets.find((item) => item.id === form.signalSetId) ?? null;
@@ -1518,6 +1715,39 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const selectedSignalSummary = selectedSignalSet?.summary ?? null;
   const canStartBacktest = Boolean(form.signalSetId && selectedSignalSet?.status === "completed");
 
+  useEffect(() => {
+    if (!selectedSignalSet || selectedSignalSet.status !== "running") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const pollSignalSet = async () => {
+      try {
+        const next = await fetchSignalSet(selectedSignalSet.id);
+        if (cancelled) return;
+        upsertSignalSet(next);
+        if (next.status === "completed") {
+          await loadSignalEvents(next.id);
+          void loadSignalSets();
+        } else if (next.status === "failed") {
+          setError(next.error || "异动信号生成失败");
+        } else {
+          timer = setTimeout(pollSignalSet, 3000);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "异动表状态刷新失败");
+        timer = setTimeout(pollSignalSet, 5000);
+      }
+    };
+
+    timer = setTimeout(pollSignalSet, 2000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSignalSet?.id, selectedSignalSet?.status]);
+
   return (
     <section className="metadata-page backtest-page">
       <div className="metadata-page-head">
@@ -1530,9 +1760,6 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
         <div className="metadata-actions">
           <button className="secondary-action" onClick={() => { void loadFavorites(); void loadSignalSets(); void loadRuns(); }}>
             刷新
-          </button>
-          <button className="primary-action" disabled={running || generatingSignalSet || loadingSignalSets || !canStartBacktest} onClick={() => void startBacktest()}>
-            {running ? "回测中..." : "开始回测"}
           </button>
         </div>
       </div>
@@ -1610,7 +1837,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 异动表会记录合约、异动时间、确认时间和命中快照；回测只从确认时间之后交易，避免未来函数。
               </p>
               <button className="primary-action" disabled={generatingSignalSet || loadingFavorites} type="submit">
-                {generatingSignalSet ? "生成中..." : "生成/刷新异动表"}
+                {generatingSignalSet ? "提交中..." : "生成/刷新异动表"}
               </button>
             </div>
           </form>
@@ -1633,44 +1860,66 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                   <span>首个异动 <b>{selectedSignalSummary?.first_signal_time ?? "--"}</b></span>
                   <span>最后异动 <b>{selectedSignalSummary?.last_signal_time ?? "--"}</b></span>
                 </div>
-                <div className="anomaly-table-scroll">
-                  <table className="anomaly-table">
-                    <thead>
-                      <tr>
-                        <th>异动时间</th>
-                        <th>确认时间</th>
-                        <th>合约代码</th>
-                        <th>异动名称</th>
-                        <th>强度</th>
-                        <th>命中条件</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {loadingEvents ? (
-                        <tr>
-                          <td colSpan={6}>正在加载异动明细...</td>
-                        </tr>
-                      ) : signalEvents.length === 0 ? (
-                        <tr>
-                          <td colSpan={6}>这张异动表没有命中记录。</td>
-                        </tr>
-                      ) : (
-                        signalEvents.slice(0, 200).map((event) => (
-                          <tr key={event.id}>
-                            <td>{event.signal_time ?? "--"}</td>
-                            <td>{event.confirm_time ?? "--"}</td>
-                            <td>{event.inst_id}</td>
-                            <td>{selectedFavorite?.name ?? selectedSignalSet.name}</td>
-                            <td>{formatOptionalNumber(event.strength)}</td>
-                            <td>{(event.matched_conditions || []).slice(0, 2).join("；") || "--"}</td>
+                {selectedSignalSet.status === "running" ? (
+                  <EmptyState
+                    title="异动表后台生成中"
+                    text="任务已经提交到后端，页面会每 3 秒自动刷新状态；逐根K线大区间可能需要几分钟。"
+                  />
+                ) : selectedSignalSet.status === "failed" ? (
+                  <EmptyState title="异动表生成失败" text={selectedSignalSet.error || "请调整区间、扫描频率或脚本指标后重新生成。"} />
+                ) : (
+                  <>
+                    <div className="anomaly-table-scroll">
+                      <table className="anomaly-table">
+                        <thead>
+                          <tr>
+                            <th>异动时间</th>
+                            <th>确认时间</th>
+                            <th>合约代码</th>
+                            <th>异动名称</th>
+                            <th>强度</th>
+                            <th>命中条件</th>
                           </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-                {signalEvents.length > 200 && (
-                  <p className="backtest-hint">当前仅展示前 200 条异动，完整数据已存入本地 SQLite。</p>
+                        </thead>
+                        <tbody>
+                          {loadingEvents ? (
+                            <tr>
+                              <td colSpan={6}>正在加载异动明细...</td>
+                            </tr>
+                          ) : signalEvents.length === 0 ? (
+                            <tr>
+                              <td colSpan={6}>这张异动表没有命中记录。</td>
+                            </tr>
+                          ) : (
+                            signalEvents.slice(0, 200).map((event) => (
+                              <tr className="anomaly-table-row" key={event.id}>
+                                <td>{event.signal_time ?? "--"}</td>
+                                <td>{event.confirm_time ?? "--"}</td>
+                                <td>
+                                  <button
+                                    className="anomaly-symbol-button"
+                                    title="查看这条异动的命中条件和K线"
+                                    type="button"
+                                    onClick={() => void openAnomalyDetail(event)}
+                                  >
+                                    {event.inst_id}
+                                  </button>
+                                </td>
+                                <td>{selectedFavorite?.name ?? selectedSignalSet.name}</td>
+                                <td>{formatOptionalNumber(event.strength)}</td>
+                                <td title={(event.matched_conditions || []).join("；")}>
+                                  {anomalyConditionPreview(event)}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                    {signalEvents.length > 200 && (
+                      <p className="backtest-hint">当前仅展示前 200 条异动，完整数据已存入本地 SQLite。</p>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -1678,6 +1927,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
 
           <form
             className="backtest-card backtest-form"
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
               void startBacktest();
@@ -1825,7 +2075,14 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       </div>
 
       {error && <div className="inline-error backtest-error">{error}</div>}
-      {generatingSignalSet && <EmptyState title="正在生成异动信号表" text="逐个历史时刻检查收藏条件命中，脚本指标会按日期缓存。" />}
+      {generatingSignalSet && (
+        <EmptyState
+          title="正在提交异动表后台任务"
+          text={form.signalMode === "each_bar_close"
+            ? "提交成功后后端会继续逐根K线扫描，页面会自动轮询任务状态。"
+            : "提交成功后后端会按每日一次扫描，页面会自动轮询任务状态。"}
+        />
+      )}
       {running && <EmptyState title="正在回测" text="先从异动表寻找入场，再按止损和到期规则模拟出场。" />}
 
       {summaryStats && (
@@ -1931,41 +2188,32 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
               </table>
             </div>
           </div>
-
-          {checkpoints.length > 0 && (
-            <div className="backtest-card checkpoint-strip">
-              <div className="backtest-card-head">
-                <span className="eyebrow">Anomaly</span>
-                <strong>最近异动检查点</strong>
-              </div>
-              <div>
-                {checkpoints.slice(-12).map((checkpoint) => (
-                  <span key={`${checkpoint.date}-${checkpoint.as_of_ts}`}>
-                    {checkpoint.signal_time} · 异动{checkpoint.matched_count} · 开仓{checkpoint.opened_count}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
         </>
       )}
-      {klineTarget && (
+      {selectedAnomaly && klineTarget ? (
+        <AnomalyEvidenceModal
+          event={selectedAnomaly}
+          signalName={selectedFavorite?.name ?? selectedSignalSet?.name ?? "异动信号"}
+          target={klineTarget}
+          activePeriod={klinePeriod}
+          data={klineData}
+          loading={klineLoading}
+          error={klineError}
+          onPeriodChange={(period) => void changeKlinePeriod(period)}
+          onClose={closeKlineModal}
+        />
+      ) : klineTarget ? (
         <ContractKlineModal
           target={klineTarget}
           activePeriod={klinePeriod}
           data={klineData}
           loading={klineLoading}
           error={klineError}
-          onPeriodChange={(period) => void changeTradeKlinePeriod(period)}
-          onClose={() => {
-            setKlineTarget(null);
-            setKlineData(null);
-            setKlineError(null);
-            setKlineMarkers([]);
-          }}
+          onPeriodChange={(period) => void changeKlinePeriod(period)}
+          onClose={closeKlineModal}
           markers={klineMarkers}
         />
-      )}
+      ) : null}
     </section>
   );
 }
@@ -4115,6 +4363,13 @@ function klinePeriodLabel(period: string) {
   return klinePeriodOptions.find((option) => option.value === period)?.label ?? timeframeLabels[period] ?? period;
 }
 
+function anomalyConditionPreview(event: SignalEvent) {
+  const conditions = event.matched_conditions || [];
+  if (conditions.length === 0) return "--";
+  const preview = conditions.slice(0, 2).join("；");
+  return conditions.length > 2 ? `${preview}；+${conditions.length - 2}` : preview;
+}
+
 function metadataOptionLabel(item: Indicator) {
   const period = timeframeLabels[item.storage_period] ?? item.storage_period;
   const source = item.source_type === "script" ? "指标生产" : "指标仓库";
@@ -4531,6 +4786,12 @@ function defaultTradeKlinePeriod(trade: BacktestTrade, preferredPeriod: string) 
       list.indexOf(period) === index && klinePeriodOptions.some((option) => option.value === period),
   );
   return candidates.find((period) => Math.ceil(durationMs / klinePeriodMs(period)) + 10 <= 300) ?? "1D";
+}
+
+function defaultAnomalyKlinePeriod(preferredPeriod: string) {
+  return [preferredPeriod, "1H", "5m", "1m", "1D"].find((period) =>
+    klinePeriodOptions.some((option) => option.value === period),
+  ) ?? "1H";
 }
 
 function tradeKlineWindowSize(
