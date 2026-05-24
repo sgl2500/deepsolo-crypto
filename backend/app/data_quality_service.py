@@ -51,7 +51,7 @@ class DataQualityService:
         instruments = self._online_instruments()
         online_symbols = {str(item.get("inst_id")) for item in instruments if item.get("inst_id")}
         selected_partitions = self._date_partitions(normalized_timeframe)
-        selected_latest = selected_partitions[-1] if selected_partitions else None
+        selected_latest = self._health_partition(normalized_timeframe, selected_partitions, instruments)
         latest_expected = (
             self._expected_symbols_for_date(normalized_timeframe, selected_latest.date, instruments)
             if selected_latest
@@ -63,15 +63,18 @@ class DataQualityService:
         timeframes: list[dict[str, Any]] = []
         for period in TIMEFRAMES:
             partitions = self._date_partitions(period)
-            latest = partitions[-1] if partitions else None
+            latest = self._health_partition(period, partitions, instruments)
             expected = self._expected_symbols_for_date(period, latest.date, instruments) if latest else set()
             missing_count = max(0, len(expected - (latest.files if latest else set())))
             extra_count = max(0, len((latest.files if latest else set()) - expected))
+            raw_latest = partitions[-1] if partitions else None
             timeframes.append(
                 {
                     "timeframe": period,
                     "latest_date": latest.date if latest else None,
                     "latest_file_count": latest.file_count if latest else 0,
+                    "raw_latest_date": raw_latest.date if raw_latest else None,
+                    "raw_latest_file_count": raw_latest.file_count if raw_latest else 0,
                     "max_file_count": max((item.file_count for item in partitions), default=0),
                     "date_count": len(partitions),
                     "expected_latest_count": len(expected),
@@ -115,6 +118,8 @@ class DataQualityService:
             "online_symbols": len(online_symbols),
             "latest_date": selected_latest.date if selected_latest else None,
             "latest_file_count": selected_latest.file_count if selected_latest else 0,
+            "raw_latest_date": selected_partitions[-1].date if selected_partitions else None,
+            "raw_latest_file_count": selected_partitions[-1].file_count if selected_partitions else 0,
             "expected_latest_count": len(latest_expected),
             "missing_latest_count": len(latest_missing),
             "extra_latest_count": len(latest_extra),
@@ -406,6 +411,22 @@ class DataQualityService:
             files = {path.name.removesuffix(".csv.gz") for path in entry.glob("*.csv.gz")}
             partitions.append(QualityDatePartition(date=date, files=files))
         return sorted(partitions, key=lambda item: item.date)
+
+    def _health_partition(
+        self,
+        timeframe: str,
+        partitions: list[QualityDatePartition],
+        instruments: list[dict[str, Any]],
+    ) -> QualityDatePartition | None:
+        if not partitions:
+            return None
+        for partition in reversed(partitions):
+            expected = self._expected_symbols_for_date(timeframe, partition.date, instruments)
+            if not expected:
+                continue
+            if partition.files == expected:
+                return partition
+        return partitions[-1]
 
     def _timeframe_dir(self, timeframe: str) -> Path:
         return self.root / TIMEFRAMES[self._normalize_timeframe(timeframe)]

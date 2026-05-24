@@ -145,6 +145,8 @@ export type DataQualityTimeframeStatus = {
   timeframe: string;
   latest_date: string | null;
   latest_file_count: number;
+  raw_latest_date?: string | null;
+  raw_latest_file_count?: number;
   max_file_count: number;
   date_count: number;
   expected_latest_count: number;
@@ -174,6 +176,8 @@ export type DataQualitySummary = {
   online_symbols: number;
   latest_date: string | null;
   latest_file_count: number;
+  raw_latest_date?: string | null;
+  raw_latest_file_count?: number;
   expected_latest_count: number;
   missing_latest_count: number;
   extra_latest_count: number;
@@ -530,6 +534,8 @@ export type BacktestSummary = {
   opened_trades: number;
   skipped_overlap: number;
   skipped_max_positions: number;
+  skipped_insufficient_equity?: number;
+  skipped_account_depleted?: number;
   skipped_no_entry: number;
   skipped_no_exit: number;
   start_date: string;
@@ -590,6 +596,8 @@ export type BacktestTrade = {
   entry_price: number;
   exit_price: number;
   stop_price?: number;
+  liquidation_price?: number | null;
+  liquidated?: boolean;
   exit_reason?: string;
   entry_reason?: string;
   trigger_pct?: number[];

@@ -2119,6 +2119,8 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 <span>开仓 <b>{summaryStats.opened_trades}</b></span>
                 <span>重叠跳过 <b>{summaryStats.skipped_overlap}</b></span>
                 <span>满仓跳过 <b>{summaryStats.skipped_max_positions}</b></span>
+                <span>保证金不足 <b>{summaryStats.skipped_insufficient_equity ?? 0}</b></span>
+                <span>账户归零 <b>{summaryStats.skipped_account_depleted ?? 0}</b></span>
                 <span>无入场 <b>{summaryStats.skipped_no_entry}</b></span>
                 <span>无出场 <b>{summaryStats.skipped_no_exit}</b></span>
                 <span>方向 <b>{summaryStats.side === "short" ? "做空" : summaryStats.side === "long" ? "做多" : "--"}</b></span>
@@ -3012,7 +3014,7 @@ function DataQualityModal({
                 <em>维表 {summary.catalog_updated_at ?? "--"}</em>
               </div>
               <div>
-                <span>最新分区</span>
+                <span>健康基准分区</span>
                 <strong>{formatDateBadge(summary.latest_date ?? "") || "--"}</strong>
                 <em>{summary.latest_file_count}/{summary.expected_latest_count} 文件</em>
               </div>
@@ -3037,15 +3039,15 @@ function DataQualityModal({
             <div className="quality-section-grid">
               <section className="quality-panel">
                 <div className="quality-panel-head">
-                  <strong>各周期最新分区</strong>
-                  <span>检查最新交易日应有文件数</span>
+                  <strong>各周期健康基准</strong>
+                  <span>优先使用最近完整分区，避免盘中半截数据误报</span>
                 </div>
                 <div className="quality-table-wrap">
                   <table className="quality-table">
                     <thead>
                       <tr>
                         <th>周期</th>
-                        <th>最新日期</th>
+                        <th>基准日期</th>
                         <th>实际/应有</th>
                         <th>缺失</th>
                         <th>状态</th>
@@ -4750,7 +4752,7 @@ function preferredQueryDate(timeframe: TimeframeSummary) {
 }
 
 function preferredContractDate(timeframe: TimeframeSummary) {
-  return timeframe.latest_date ?? timeframe.recommended_date ?? "";
+  return timeframe.recommended_date ?? timeframe.latest_date ?? "";
 }
 
 function defaultRunDate(summary: DataSummary | null, period: string) {

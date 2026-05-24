@@ -542,6 +542,8 @@ class SignalPoolService:
             "opened_trades": 0,
             "skipped_overlap": 0,
             "skipped_max_positions": 0,
+            "skipped_insufficient_equity": 0,
+            "skipped_account_depleted": 0,
             "skipped_no_entry": 0,
             "skipped_no_exit": 0,
             "skipped_entry_rule": 0,
@@ -573,17 +575,34 @@ class SignalPoolService:
         open_positions: list[dict[str, Any]] = []
         trades: list[dict[str, Any]] = []
         opened_by_confirm: dict[int, int] = {}
+        position_usdt = float(config["position_usdt"])
+        initial_capital = position_usdt * int(config["max_positions"])
+        realized_pnl = 0.0
 
         for candidate in entry_candidates:
             inst_id = str(candidate.event.get("inst_id") or "")
             entry_ts = candidate.entry_bar.ts
-            open_positions = [item for item in open_positions if int(item["exit_ts"]) > entry_ts]
+            still_open: list[dict[str, Any]] = []
+            for item in open_positions:
+                if int(item["exit_ts"]) <= entry_ts:
+                    realized_pnl += float(item.get("pnl_usdt") or 0)
+                else:
+                    still_open.append(item)
+            open_positions = still_open
             open_symbols = {str(item["inst_id"]) for item in open_positions}
             if inst_id in open_symbols:
                 counters["skipped_overlap"] += 1
                 continue
             if len(open_positions) >= int(config["max_positions"]):
                 counters["skipped_max_positions"] += 1
+                continue
+            equity_at_entry = initial_capital + realized_pnl
+            if equity_at_entry <= 0:
+                counters["skipped_account_depleted"] += 1
+                continue
+            locked_margin = len(open_positions) * position_usdt
+            if equity_at_entry - locked_margin + 1e-9 < position_usdt:
+                counters["skipped_insufficient_equity"] += 1
                 continue
 
             series = price_cache[(entry_timeframe, inst_id)]
@@ -595,7 +614,7 @@ class SignalPoolService:
                     counters["skipped_no_entry"] += 1
                 continue
             trades.append(trade)
-            open_positions.append({"inst_id": inst_id, "exit_ts": trade["exit_ts"]})
+            open_positions.append({"inst_id": inst_id, "exit_ts": trade["exit_ts"], "pnl_usdt": trade["pnl_usdt"]})
             counters["opened_trades"] += 1
             opened_by_confirm[int(candidate.event["confirm_ts"])] = opened_by_confirm.get(int(candidate.event["confirm_ts"]), 0) + 1
 
@@ -705,6 +724,12 @@ class SignalPoolService:
         exit_reason = "到期平仓"
         stop_loss_pct = float(config["stop_loss_pct"])
         stop_model = str(config["stop_model"])
+        position_usdt = float(config["position_usdt"])
+        leverage = float(config["leverage"])
+        notional_usdt = position_usdt * leverage
+        liquidation_price = _liquidation_price(side, raw_entry, leverage)
+        liquidation_pct = 100 / leverage if leverage > 0 else None
+        liquidated = False
         max_adverse = 0.0
         max_favorable = 0.0
 
@@ -715,36 +740,49 @@ class SignalPoolService:
         else:
             stop_price = raw_entry * (1 - stop_loss_pct / 100)
 
+        def stop_hit(bar: PriceBar, *, checkpoint: bool) -> bool:
+            if stop_model == "hard_stop_intrabar":
+                return bar.high >= stop_price if side == "short" else bar.low <= stop_price
+            if stop_model == "bot_like_checkpoint":
+                return checkpoint and (bar.open >= stop_price if side == "short" else bar.open <= stop_price)
+            raise ValueError(f"不支持的止损模型：{stop_model}")
+
+        stop_before_liquidation = (
+            stop_model == "hard_stop_intrabar"
+            and liquidation_pct is not None
+            and stop_loss_pct <= liquidation_pct
+        )
+
         for index in range(entry_idx, exit_idx):
             bar = series.bars[index]
             adverse, favorable = _excursion_pct(side, raw_entry, bar)
             max_adverse = max(max_adverse, adverse)
             max_favorable = max(max_favorable, favorable)
-            if stop_model == "hard_stop_intrabar":
-                hit = bar.high >= stop_price if side == "short" else bar.low <= stop_price
-                if hit:
-                    real_exit_idx = index
-                    raw_exit = stop_price
-                    exit_reason = "盘中硬止损"
-                    break
-            elif stop_model == "bot_like_checkpoint":
-                hit = bar.open >= stop_price if side == "short" else bar.open <= stop_price
-                if index > entry_idx and hit:
-                    real_exit_idx = index
-                    raw_exit = float(bar.open)
-                    exit_reason = "检查点止损"
-                    break
-            else:
-                raise ValueError(f"不支持的止损模型：{stop_model}")
+
+            if stop_before_liquidation and stop_hit(bar, checkpoint=index > entry_idx):
+                real_exit_idx = index
+                raw_exit = stop_price
+                exit_reason = "盘中硬止损"
+                break
+
+            if liquidation_price is not None and _liquidation_hit(side, liquidation_price, bar):
+                real_exit_idx = index
+                raw_exit = liquidation_price
+                exit_reason = "爆仓"
+                liquidated = True
+                break
+
+            if not stop_before_liquidation and stop_hit(bar, checkpoint=index > entry_idx):
+                real_exit_idx = index
+                raw_exit = stop_price if stop_model == "hard_stop_intrabar" else float(bar.open)
+                exit_reason = "盘中硬止损" if stop_model == "hard_stop_intrabar" else "检查点止损"
+                break
 
         exit_bar = series.bars[real_exit_idx]
         adverse, favorable = _excursion_pct(side, raw_entry, exit_bar)
         max_adverse = max(max_adverse, adverse)
         max_favorable = max(max_favorable, favorable)
 
-        position_usdt = float(config["position_usdt"])
-        leverage = float(config["leverage"])
-        notional_usdt = position_usdt * leverage
         fee_bps = float(config["fee_bps_per_side"])
         slippage_bps = float(config["slippage_bps_per_side"])
         if side == "short":
@@ -754,9 +792,9 @@ class SignalPoolService:
         fee_pct = 2 * fee_bps / 100
         slippage_pct = 2 * slippage_bps / 100
         net_pct_on_notional = gross_pct - fee_pct - slippage_pct
-        pnl_usdt = notional_usdt * net_pct_on_notional / 100
         fee_usdt = notional_usdt * fee_pct / 100
         slippage_usdt = notional_usdt * slippage_pct / 100
+        pnl_usdt = -position_usdt if liquidated else notional_usdt * net_pct_on_notional / 100
         net_return_pct = pnl_usdt / position_usdt * 100 if position_usdt else 0
         event = candidate.event
 
@@ -786,6 +824,8 @@ class SignalPoolService:
                 "entry_price": _round(raw_entry, 12),
                 "exit_price": _round(raw_exit, 12),
                 "stop_price": _round(stop_price, 12),
+                "liquidation_price": _round(liquidation_price, 12) if liquidation_price is not None else None,
+                "liquidated": liquidated,
                 "exit_reason": exit_reason,
                 "entry_reason": candidate.entry_reason,
                 "trigger_pct": candidate.trigger_pct,
@@ -1392,6 +1432,22 @@ def _excursion_pct(side: str, entry_price: float, bar: PriceBar) -> tuple[float,
         adverse = -(bar.low - entry_price) / entry_price * 100
         favorable = (bar.high - entry_price) / entry_price * 100
     return max(0.0, adverse), max(0.0, favorable)
+
+
+def _liquidation_price(side: str, entry_price: float, leverage: float) -> float | None:
+    if entry_price <= 0 or leverage <= 0:
+        return None
+    liquidation_move = 1 / leverage
+    if side == "short":
+        return entry_price * (1 + liquidation_move)
+    price = entry_price * (1 - liquidation_move)
+    return price if price > 0 else None
+
+
+def _liquidation_hit(side: str, liquidation_price: float, bar: PriceBar) -> bool:
+    if side == "short":
+        return bar.high >= liquidation_price
+    return bar.low <= liquidation_price
 
 
 def _safe_int(value: Any) -> int | None:

@@ -324,9 +324,8 @@ class DataSourceService:
         if not partitions:
             return None
         max_files = max(item.file_count for item in partitions)
-        threshold = max(1, int(max_files * 0.8))
         for item in reversed(partitions):
-            if item.file_count >= threshold:
+            if item.file_count >= max_files:
                 return item.date
         return partitions[-1].date
 
