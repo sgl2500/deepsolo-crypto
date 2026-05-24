@@ -9,9 +9,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from .config import TIMEFRAMES
+from .settings import INDICATOR_STORE_PATH, PROJECT_ROOT
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-STORE_PATH = ROOT_DIR / ".runtime" / "indicator_repository.json"
+ROOT_DIR = PROJECT_ROOT
+STORE_PATH = INDICATOR_STORE_PATH
 
 DataType = Literal["number", "string", "datetime", "boolean"]
 SourceType = Literal["raw", "manual", "computed", "script"]

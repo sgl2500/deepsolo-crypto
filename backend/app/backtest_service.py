@@ -4,7 +4,6 @@ import csv
 import gzip
 import json
 import math
-import os
 import sqlite3
 import time
 import uuid
@@ -19,9 +18,10 @@ from .config import APP_TIMEZONE, TIMEFRAMES
 from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
 from .screener import query_screener
+from .settings import BACKTEST_DB_PATH, PROJECT_ROOT
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = Path(os.getenv("BACKTEST_DB", ROOT_DIR / ".runtime" / "backtests.sqlite3"))
+ROOT_DIR = PROJECT_ROOT
+DB_PATH = BACKTEST_DB_PATH
 MAX_CHECKPOINTS = 500
 
 

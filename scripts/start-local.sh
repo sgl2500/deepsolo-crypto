@@ -4,10 +4,88 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
-RUNTIME_DIR="$ROOT_DIR/.runtime"
 VENV_DIR="$ROOT_DIR/.venv"
 
-DATA_ROOT="${CRYPTO_DATA_ROOT:-/Users/sunguanlong/Desktop/crypto/crypto-v2/data/normalized_gzip}"
+ORIGINAL_ENV_KEYS="$(env | sed 's/=.*//' | tr '\n' ' ')"
+
+trim_env_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+is_original_env_key() {
+  case " $ORIGINAL_ENV_KEYS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+load_env_file() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    local line key value first last
+    line="$(trim_env_value "$raw_line")"
+    [ -z "$line" ] && continue
+    [[ "$line" == \#* ]] && continue
+    if [[ "$line" == export\ * ]]; then
+      line="$(trim_env_value "${line#export }")"
+    fi
+    [[ "$line" == *"="* ]] || continue
+
+    key="$(trim_env_value "${line%%=*}")"
+    value="$(trim_env_value "${line#*=}")"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    is_original_env_key "$key" && continue
+
+    if [ "${#value}" -ge 2 ]; then
+      first="${value:0:1}"
+      last="${value:${#value}-1:1}"
+      if { [ "$first" = "'" ] || [ "$first" = '"' ]; } && [ "$first" = "$last" ]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    export "$key=$value"
+  done < "$file"
+}
+
+resolve_project_path() {
+  python3 - "$ROOT_DIR" "$1" <<'PY'
+import os
+import sys
+
+root, raw = sys.argv[1], sys.argv[2]
+path = os.path.expandvars(os.path.expanduser(raw))
+if not os.path.isabs(path):
+    path = os.path.join(root, path)
+print(os.path.normpath(path))
+PY
+}
+
+load_env_file "$ROOT_DIR/.env"
+load_env_file "$ROOT_DIR/.env.local"
+
+LEGACY_DATA_ROOT="/Users/sunguanlong/Desktop/crypto/crypto-v2/data/normalized_gzip"
+DEFAULT_DATA_ROOT="$ROOT_DIR/data/normalized_gzip"
+if [ -d "$LEGACY_DATA_ROOT" ]; then
+  DEFAULT_DATA_ROOT="$LEGACY_DATA_ROOT"
+fi
+
+if is_original_env_key "CRYPTO_DATA_ROOT" && [ -n "${CRYPTO_DATA_ROOT:-}" ]; then
+  DATA_ROOT="$CRYPTO_DATA_ROOT"
+elif is_original_env_key "DATA_ROOT" && [ -n "${DATA_ROOT:-}" ]; then
+  DATA_ROOT="$DATA_ROOT"
+else
+  DATA_ROOT="${CRYPTO_DATA_ROOT:-${DATA_ROOT:-$DEFAULT_DATA_ROOT}}"
+fi
+DATA_ROOT="$(resolve_project_path "$DATA_ROOT")"
+CRYPTO_DATA_ROOT="$DATA_ROOT"
+RUNTIME_DIR="${RUNTIME_ROOT:-$ROOT_DIR/.runtime}"
+RUNTIME_DIR="$(resolve_project_path "$RUNTIME_DIR")"
+RUNTIME_ROOT="$RUNTIME_DIR"
 APP_TIMEZONE="${APP_TIMEZONE:-Asia/Shanghai}"
 
 # Some shells export broken certificate variables; pip treats them as hard errors.
@@ -98,7 +176,12 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ] || [ ! -f "$NODE_STAMP" ] || [ "$(cat "
 fi
 
 cat > "$RUNTIME_DIR/local.env" <<EOF
+DATA_ROOT=$DATA_ROOT
 CRYPTO_DATA_ROOT=$DATA_ROOT
+RUNTIME_ROOT=$RUNTIME_ROOT
+CRYPTO_V2_ROOT=${CRYPTO_V2_ROOT:-}
+STRATEGY_RESEARCH_ROOT=${STRATEGY_RESEARCH_ROOT:-}
+USE_LEGACY_PIPELINE=${USE_LEGACY_PIPELINE:-}
 APP_TIMEZONE=$APP_TIMEZONE
 BACKEND_PORT=$BACKEND_PORT
 FRONTEND_PORT=$FRONTEND_PORT
@@ -107,7 +190,9 @@ OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.4-mini}
 OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com}
 EOF
 
+export DATA_ROOT="$DATA_ROOT"
 export CRYPTO_DATA_ROOT="$DATA_ROOT"
+export RUNTIME_ROOT="$RUNTIME_ROOT"
 export APP_TIMEZONE="$APP_TIMEZONE"
 export VITE_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT"
 export OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.4-mini}"

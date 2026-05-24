@@ -12,24 +12,21 @@ from pathlib import Path
 from typing import Any
 
 from .config import DATA_ROOT
+from .settings import (
+    CONTRACT_UPDATE_RUNTIME_DIR,
+    CRYPTO_V2_ROOT,
+    PROJECT_ROOT,
+    STRATEGY_RESEARCH_ROOT,
+    USE_LEGACY_PIPELINE,
+)
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-RUNTIME_DIR = ROOT_DIR / ".runtime" / "contract_update"
+ROOT_DIR = PROJECT_ROOT
+RUNTIME_DIR = CONTRACT_UPDATE_RUNTIME_DIR
 STATUS_PATH = RUNTIME_DIR / "status.json"
 LOG_PATH = RUNTIME_DIR / "latest.log"
 
-DEFAULT_STRATEGY_ROOT = Path(
-    os.getenv(
-        "STRATEGY_RESEARCH_ROOT",
-        "/Users/sunguanlong/Desktop/crypto/strategy-research",
-    )
-)
-DEFAULT_CRYPTO_V2_ROOT = Path(
-    os.getenv(
-        "CRYPTO_V2_ROOT",
-        str(DATA_ROOT.parents[1] if len(DATA_ROOT.parents) > 1 else DATA_ROOT),
-    )
-)
+DEFAULT_STRATEGY_ROOT = STRATEGY_RESEARCH_ROOT
+DEFAULT_CRYPTO_V2_ROOT = CRYPTO_V2_ROOT
 
 CST = timezone(timedelta(hours=8))
 MAX_TAIL_CHARS = 20000
@@ -77,6 +74,7 @@ class ContractUpdateService:
                 "strategy_root": str(DEFAULT_STRATEGY_ROOT),
                 "crypto_v2_root": str(DEFAULT_CRYPTO_V2_ROOT),
                 "data_root": str(DATA_ROOT),
+                "legacy_pipeline": USE_LEGACY_PIPELINE,
                 "options": {
                     "force": force,
                     "backfill_history": backfill_history,
@@ -128,6 +126,7 @@ class ContractUpdateService:
             self._set_state(stage="validating", stage_label="检查脚本与数据目录")
             self._validate_paths()
 
+            quality_mtime_before = self._quality_file_mtime()
             update_cmd = self._data_update_command(
                 force=force,
                 backfill_history=backfill_history,
@@ -135,7 +134,29 @@ class ContractUpdateService:
                 limit=limit,
                 symbol_limit=symbol_limit,
             )
-            self._run_command("update_data", "更新合约与K线数据", update_cmd, DEFAULT_STRATEGY_ROOT / "versions-crypto")
+            try:
+                self._run_command("update_data", "更新合约与K线数据", update_cmd, DEFAULT_STRATEGY_ROOT / "versions-crypto")
+            except RuntimeError:
+                if not self._can_retry_without_instrument_sync():
+                    raise
+                self._append_log(
+                    "合约维表同步失败，但本地已有合约维表，自动跳过合约维表同步并重试刷新K线。"
+                )
+                retry_cmd = self._data_update_command(
+                    force=force,
+                    backfill_history=backfill_history,
+                    pages=pages,
+                    limit=limit,
+                    symbol_limit=symbol_limit,
+                    skip_instrument_sync=True,
+                )
+                self._run_command(
+                    "update_data_no_instrument_sync",
+                    "更新合约与K线数据（跳过合约维表同步重试）",
+                    retry_cmd,
+                    DEFAULT_STRATEGY_ROOT / "versions-crypto",
+                )
+            self._validate_update_quality(previous_mtime=quality_mtime_before)
 
             if build_daily:
                 daily_cmd = self._daily_command(daily_days=daily_days, symbol_limit=symbol_limit)
@@ -165,6 +186,8 @@ class ContractUpdateService:
             )
 
     def _validate_paths(self) -> None:
+        if not USE_LEGACY_PIPELINE:
+            raise RuntimeError("旧数据更新流水线未启用：请在 .env.local 中配置 USE_LEGACY_PIPELINE=true 后再执行更新部署。")
         update_script = DEFAULT_STRATEGY_ROOT / "versions-crypto" / "增量下载数据.py"
         daily_script = DEFAULT_CRYPTO_V2_ROOT / "scripts" / "build_daily_bars.py"
         if not update_script.exists():
@@ -182,6 +205,7 @@ class ContractUpdateService:
         pages: int | None,
         limit: int,
         symbol_limit: int | None,
+        skip_instrument_sync: bool = False,
     ) -> list[str]:
         cmd = [
             _python_bin(),
@@ -203,7 +227,65 @@ class ContractUpdateService:
             cmd += ["--pages", str(max(1, min(pages, 200)))]
         if symbol_limit is not None:
             cmd += ["--symbol-limit", str(max(1, symbol_limit))]
+        if skip_instrument_sync:
+            cmd.append("--no-sync-instruments")
         return cmd
+
+    def _can_retry_without_instrument_sync(self) -> bool:
+        dim_catalog = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "instruments_okx_usdt_swap_dim.json"
+        legacy_symbol_catalog = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "symbols_usdt_swap.json"
+        if not dim_catalog.exists() and not legacy_symbol_catalog.exists():
+            self._append_log("本地没有可复用的合约维表，不能跳过合约维表同步。")
+            return False
+
+        log_tail = _read_tail(LOG_PATH, MAX_TAIL_CHARS)
+        instrument_sync_failed = (
+            "sync_okx_instruments.py" in log_tail
+            or "get_instruments" in log_tail
+            or "合约维表" in log_tail
+        )
+        if not instrument_sync_failed:
+            return False
+        return True
+
+    def _quality_file_mtime(self) -> int | None:
+        quality_path = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "okx_1m_update_quality.json"
+        try:
+            return quality_path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _validate_update_quality(self, *, previous_mtime: int | None) -> None:
+        quality_path = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "okx_1m_update_quality.json"
+        if not quality_path.exists():
+            return
+        try:
+            current_mtime = quality_path.stat().st_mtime_ns
+        except OSError:
+            return
+        if previous_mtime is not None and current_mtime <= previous_mtime:
+            return
+        try:
+            payload = json.loads(quality_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+
+        extra = payload.get("extra") if isinstance(payload, dict) else None
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        if not isinstance(extra, dict):
+            return
+        symbols = extra.get("symbols")
+        errors = extra.get("errors")
+        if not isinstance(symbols, list) or not isinstance(errors, list) or not symbols:
+            return
+
+        success_count = 0
+        if isinstance(summary, dict):
+            success_count = int(summary.get("symbols") or 0)
+        if success_count <= 0 and len(errors) >= len(symbols):
+            raise RuntimeError(
+                "行情源当前不可用：本次K线刷新全部失败。请先确认 relay/OKX 网络可访问，稍后再执行更新部署。"
+            )
 
     def _daily_command(self, *, daily_days: int, symbol_limit: int | None) -> list[str]:
         today = datetime.now(CST).date()
@@ -324,6 +406,7 @@ class ContractUpdateService:
             "strategy_root": str(DEFAULT_STRATEGY_ROOT),
             "crypto_v2_root": str(DEFAULT_CRYPTO_V2_ROOT),
             "data_root": str(DATA_ROOT),
+            "legacy_pipeline": USE_LEGACY_PIPELINE,
             "options": {},
         }
 

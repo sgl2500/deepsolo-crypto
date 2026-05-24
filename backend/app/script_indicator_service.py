@@ -16,9 +16,10 @@ from zoneinfo import ZoneInfo
 
 from .config import APP_TIMEZONE, DATA_ROOT, TIMEFRAMES
 from .indicator_repository import indicator_repository
+from .settings import PROJECT_ROOT, RUNTIME_ROOT, SCRIPT_INDICATOR_ROOT
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-SCRIPT_ROOT = ROOT_DIR / ".runtime" / "script_indicators"
+ROOT_DIR = PROJECT_ROOT
+SCRIPT_ROOT = SCRIPT_INDICATOR_ROOT
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
 DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 SCRIPT_TIMEOUT_SECONDS = 30
@@ -57,7 +58,7 @@ def generate_script(indicator_id: str, requirement: str, input_timeframe: str) -
     prompt = build_prompt(indicator, requirement, input_timeframe)
     api_key = _openai_api_key()
     if not api_key:
-        raise ValueError("未配置 OPENAI_API_KEY，请先在本地环境变量或 .runtime/secrets.env 中设置。")
+        raise ValueError(f"未配置 OPENAI_API_KEY，请先在本地环境变量或 {RUNTIME_ROOT / 'secrets.env'} 中设置。")
 
     model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
     payload = {

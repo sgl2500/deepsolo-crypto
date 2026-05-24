@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+from .settings import PROJECT_ROOT, SCREENER_FAVORITES_DB_PATH
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = Path(os.getenv("SCREENER_FAVORITES_DB", ROOT_DIR / ".runtime" / "screener_favorites.sqlite3"))
+
+ROOT_DIR = PROJECT_ROOT
+DB_PATH = SCREENER_FAVORITES_DB_PATH
 
 
 class ScreenerFavoriteRepository:
