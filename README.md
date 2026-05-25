@@ -16,7 +16,15 @@
 ./scripts/start-local.sh
 ```
 
-如果是一个干净 clone，还没有真实数据，可以先生成一份小样例数据：
+如果是一个干净 clone，想直接下载真实 OKX 数据并启动：
+
+```bash
+./scripts/bootstrap-okx-local.sh
+```
+
+它会把约 5 天真实 OKX USDT 永续合约 K 线初始化到 `./data/normalized_gzip`，再启动本地 Web 服务。`./data/` 会被 Git 忽略，不会提交到仓库。
+
+如果只是想快速看界面，也可以生成一份小样例数据：
 
 ```bash
 python3 scripts/generate-sample-data.py
@@ -73,6 +81,34 @@ FRONTEND_PORT=49200 BACKEND_PORT=49201 ./scripts/start-local.sh
 CRYPTO_DATA_ROOT=/path/to/normalized_gzip ./scripts/start-local.sh
 ```
 
+## 初始化真实 OKX 数据
+
+只下载数据，不启动服务：
+
+```bash
+python3 scripts/init-okx-data.py --days 5
+```
+
+快速烟测少量品种：
+
+```bash
+python3 scripts/init-okx-data.py --days 2 --symbol-limit 5
+```
+
+继续一个未完成的下载：
+
+```bash
+python3 scripts/init-okx-data.py --days 5 --resume
+```
+
+重新初始化目标数据目录：
+
+```bash
+python3 scripts/init-okx-data.py --days 5 --force
+```
+
+默认数据源是 OKX 公共 REST API，不需要 API Key。下载速度受 OKX 网络和限流影响。更多说明见 [docs/okx-data-bootstrap.md](docs/okx-data-bootstrap.md)。
+
 ## 数据格式
 
 数据根目录应类似：
@@ -119,7 +155,7 @@ cp .env.example .env.local
 - `USE_LEGACY_PIPELINE`：是否启用本地数据更新流水线；已有 `local-pipeline` 时默认可以启用。
 - `OPENAI_API_KEY`：只建议放到 `.env.local` 或 `.runtime/secrets.env`，不要提交。
 
-当前项目默认从项目目录读取数据和本地流水线。`./data/`、`./runtime/`、`./sample_data/` 都不会提交到 Git。
+当前项目默认从项目目录读取数据和本地流水线。`./data/`、`./.runtime/`、`./sample_data/` 都不会提交到 Git。
 
 ## 环境诊断
 
@@ -149,6 +185,7 @@ python3 scripts/doctor.py --strict
 
 - 开发说明：[docs/development.md](docs/development.md)
 - 数据格式：[docs/data-format.md](docs/data-format.md)
+- OKX 数据初始化：[docs/okx-data-bootstrap.md](docs/okx-data-bootstrap.md)
 - 路线图：[docs/roadmap.md](docs/roadmap.md)
 - 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全说明：[SECURITY.md](SECURITY.md)

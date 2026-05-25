@@ -32,6 +32,18 @@ The original external source directories were copied into the project and left i
 
 This keeps the local project self-contained while keeping the public repository small and clean.
 
+## Clean Checkout With Real Data
+
+For a new clone, use the OKX bootstrap path:
+
+```bash
+./scripts/bootstrap-okx-local.sh
+```
+
+It initializes real public OKX candle data under `./data/normalized_gzip` and
+then starts the app. Existing candle files are not overwritten unless the data
+initializer is run with `--force`.
+
 ## Verification
 
 Use:

@@ -32,6 +32,9 @@ jobs:
       - name: Compile Python
         run: python -m compileall backend scripts local-pipeline/crypto-v2/src local-pipeline/crypto-v2/scripts local-pipeline/strategy-research
 
+      - name: OKX initializer help
+        run: python scripts/init-okx-data.py --help
+
       - name: Backend import smoke test
         run: PYTHONPATH=backend python -c "from app.main import app; assert app.title"
 

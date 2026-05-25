@@ -25,6 +25,12 @@ The script creates `.venv`, installs backend dependencies, installs frontend dep
 
 If `./data/normalized_gzip` exists, startup uses it by default.
 
+To initialize real OKX data in a clean checkout and then start the app:
+
+```bash
+./scripts/bootstrap-okx-local.sh
+```
+
 To run against sample data in a clean checkout:
 
 ```bash
@@ -62,6 +68,7 @@ Run these checks before sharing a change:
 
 ```bash
 python3 -m compileall backend scripts local-pipeline/crypto-v2/src local-pipeline/crypto-v2/scripts local-pipeline/strategy-research
+python3 scripts/init-okx-data.py --help
 python3 scripts/doctor.py
 cd frontend && npm ci && npm run build
 ```
@@ -77,3 +84,20 @@ cd frontend && npm ci && npm run build
 - `USE_LEGACY_PIPELINE` enables the local data update pipeline when the copied scripts exist.
 - `RUNTIME_ROOT` defaults to `.runtime` and is safe to delete when you want a clean local state.
 - `OPENAI_API_KEY` is optional and should stay in `.env.local` or `.runtime/secrets.env`.
+
+## Real OKX Data
+
+The repository does not include real market data. Use:
+
+```bash
+python3 scripts/init-okx-data.py --days 5
+```
+
+The script writes to ignored project-local paths by default:
+
+- `data/normalized_gzip`
+- `data/catalog`
+- `data/raw/okx`
+
+It refuses to modify an existing candle dataset unless you pass `--resume` or
+`--force`.
