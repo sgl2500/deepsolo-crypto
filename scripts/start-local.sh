@@ -68,11 +68,7 @@ PY
 load_env_file "$ROOT_DIR/.env"
 load_env_file "$ROOT_DIR/.env.local"
 
-LEGACY_DATA_ROOT="/Users/sunguanlong/Desktop/crypto/crypto-v2/data/normalized_gzip"
 DEFAULT_DATA_ROOT="$ROOT_DIR/data/normalized_gzip"
-if [ -d "$LEGACY_DATA_ROOT" ]; then
-  DEFAULT_DATA_ROOT="$LEGACY_DATA_ROOT"
-fi
 
 if is_original_env_key "CRYPTO_DATA_ROOT" && [ -n "${CRYPTO_DATA_ROOT:-}" ]; then
   DATA_ROOT="$CRYPTO_DATA_ROOT"
@@ -86,6 +82,15 @@ CRYPTO_DATA_ROOT="$DATA_ROOT"
 RUNTIME_DIR="${RUNTIME_ROOT:-$ROOT_DIR/.runtime}"
 RUNTIME_DIR="$(resolve_project_path "$RUNTIME_DIR")"
 RUNTIME_ROOT="$RUNTIME_DIR"
+CRYPTO_V2_ROOT="${CRYPTO_V2_ROOT:-$ROOT_DIR/local-pipeline/crypto-v2}"
+CRYPTO_V2_ROOT="$(resolve_project_path "$CRYPTO_V2_ROOT")"
+STRATEGY_RESEARCH_ROOT="${STRATEGY_RESEARCH_ROOT:-$ROOT_DIR/local-pipeline/strategy-research}"
+STRATEGY_RESEARCH_ROOT="$(resolve_project_path "$STRATEGY_RESEARCH_ROOT")"
+CATALOG_ROOT="${CATALOG_ROOT:-$ROOT_DIR/data/catalog}"
+CATALOG_ROOT="$(resolve_project_path "$CATALOG_ROOT")"
+if [ -z "${USE_LEGACY_PIPELINE:-}" ] && [ -f "$STRATEGY_RESEARCH_ROOT/versions-crypto/增量下载数据.py" ]; then
+  USE_LEGACY_PIPELINE=true
+fi
 APP_TIMEZONE="${APP_TIMEZONE:-Asia/Shanghai}"
 
 # Some shells export broken certificate variables; pip treats them as hard errors.
@@ -179,8 +184,9 @@ cat > "$RUNTIME_DIR/local.env" <<EOF
 DATA_ROOT=$DATA_ROOT
 CRYPTO_DATA_ROOT=$DATA_ROOT
 RUNTIME_ROOT=$RUNTIME_ROOT
-CRYPTO_V2_ROOT=${CRYPTO_V2_ROOT:-}
-STRATEGY_RESEARCH_ROOT=${STRATEGY_RESEARCH_ROOT:-}
+CRYPTO_V2_ROOT=$CRYPTO_V2_ROOT
+STRATEGY_RESEARCH_ROOT=$STRATEGY_RESEARCH_ROOT
+CATALOG_ROOT=$CATALOG_ROOT
 USE_LEGACY_PIPELINE=${USE_LEGACY_PIPELINE:-}
 APP_TIMEZONE=$APP_TIMEZONE
 BACKEND_PORT=$BACKEND_PORT
@@ -193,6 +199,9 @@ EOF
 export DATA_ROOT="$DATA_ROOT"
 export CRYPTO_DATA_ROOT="$DATA_ROOT"
 export RUNTIME_ROOT="$RUNTIME_ROOT"
+export CRYPTO_V2_ROOT="$CRYPTO_V2_ROOT"
+export STRATEGY_RESEARCH_ROOT="$STRATEGY_RESEARCH_ROOT"
+export CATALOG_ROOT="$CATALOG_ROOT"
 export APP_TIMEZONE="$APP_TIMEZONE"
 export VITE_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT"
 export OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.4-mini}"

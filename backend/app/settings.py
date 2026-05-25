@@ -69,32 +69,16 @@ def _bool_from_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-LEGACY_CRYPTO_V2_ROOT = Path("/Users/sunguanlong/Desktop/crypto/crypto-v2")
-LEGACY_STRATEGY_RESEARCH_ROOT = Path("/Users/sunguanlong/Desktop/crypto/strategy-research")
-LEGACY_DATA_ROOT = LEGACY_CRYPTO_V2_ROOT / "data" / "normalized_gzip"
-
-DEFAULT_CRYPTO_V2_ROOT = LEGACY_CRYPTO_V2_ROOT if LEGACY_CRYPTO_V2_ROOT.exists() else PROJECT_ROOT
+DEFAULT_CRYPTO_V2_ROOT = PROJECT_ROOT / "local-pipeline" / "crypto-v2"
 CRYPTO_V2_ROOT = _path_from_env(("CRYPTO_V2_ROOT",), DEFAULT_CRYPTO_V2_ROOT)
 
-DEFAULT_STRATEGY_RESEARCH_ROOT = (
-    LEGACY_STRATEGY_RESEARCH_ROOT if LEGACY_STRATEGY_RESEARCH_ROOT.exists() else PROJECT_ROOT
-)
+DEFAULT_STRATEGY_RESEARCH_ROOT = PROJECT_ROOT / "local-pipeline" / "strategy-research"
 STRATEGY_RESEARCH_ROOT = _path_from_env(("STRATEGY_RESEARCH_ROOT",), DEFAULT_STRATEGY_RESEARCH_ROOT)
 
-DEFAULT_DATA_ROOT = (
-    LEGACY_DATA_ROOT
-    if LEGACY_DATA_ROOT.exists()
-    else CRYPTO_V2_ROOT / "data" / "normalized_gzip"
-    if CRYPTO_V2_ROOT != PROJECT_ROOT
-    else PROJECT_ROOT / "data" / "normalized_gzip"
-)
+DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "normalized_gzip"
 DATA_ROOT = _path_from_alias_env(("CRYPTO_DATA_ROOT", "DATA_ROOT"), DEFAULT_DATA_ROOT)
 
-DEFAULT_CATALOG_ROOT = (
-    CRYPTO_V2_ROOT / "data" / "catalog"
-    if CRYPTO_V2_ROOT != PROJECT_ROOT
-    else PROJECT_ROOT / "data" / "catalog"
-)
+DEFAULT_CATALOG_ROOT = PROJECT_ROOT / "data" / "catalog"
 CATALOG_ROOT = _path_from_env(("CATALOG_ROOT",), DEFAULT_CATALOG_ROOT)
 
 RUNTIME_ROOT = _path_from_env(("RUNTIME_ROOT",), PROJECT_ROOT / ".runtime")

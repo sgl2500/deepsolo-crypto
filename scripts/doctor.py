@@ -74,7 +74,7 @@ def main() -> int:
     print(f"App timezone: {settings.APP_TIMEZONE}")
     print(f"Data root:    {settings.DATA_ROOT}")
     print(f"Runtime root: {settings.RUNTIME_ROOT}")
-    print(f"Legacy data update pipeline: {settings.USE_LEGACY_PIPELINE}")
+    print(f"Local data update pipeline: {settings.USE_LEGACY_PIPELINE}")
     print()
 
     critical_ok = True

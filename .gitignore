@@ -3,8 +3,16 @@
 .env.local
 .runtime/
 .venv/
+data/
+sample_data/
+local-pipeline/crypto-v2/data/
+local-pipeline/crypto-v2/logs/
+local-pipeline/crypto-v2/reports/
+local-pipeline/strategy-research/versions-crypto/logs/
+local-pipeline/strategy-research/versions-crypto/live_status/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 node_modules/
 dist/
 .vite/

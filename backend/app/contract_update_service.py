@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import DATA_ROOT
 from .settings import (
+    CATALOG_ROOT,
     CONTRACT_UPDATE_RUNTIME_DIR,
     CRYPTO_V2_ROOT,
     PROJECT_ROOT,
@@ -187,7 +188,7 @@ class ContractUpdateService:
 
     def _validate_paths(self) -> None:
         if not USE_LEGACY_PIPELINE:
-            raise RuntimeError("旧数据更新流水线未启用：请在 .env.local 中配置 USE_LEGACY_PIPELINE=true 后再执行更新部署。")
+            raise RuntimeError("本地数据更新流水线未启用：请在 .env.local 中配置 USE_LEGACY_PIPELINE=true 后再执行更新部署。")
         update_script = DEFAULT_STRATEGY_ROOT / "versions-crypto" / "增量下载数据.py"
         daily_script = DEFAULT_CRYPTO_V2_ROOT / "scripts" / "build_daily_bars.py"
         if not update_script.exists():
@@ -232,8 +233,8 @@ class ContractUpdateService:
         return cmd
 
     def _can_retry_without_instrument_sync(self) -> bool:
-        dim_catalog = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "instruments_okx_usdt_swap_dim.json"
-        legacy_symbol_catalog = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "symbols_usdt_swap.json"
+        dim_catalog = CATALOG_ROOT / "instruments_okx_usdt_swap_dim.json"
+        legacy_symbol_catalog = CATALOG_ROOT / "symbols_usdt_swap.json"
         if not dim_catalog.exists() and not legacy_symbol_catalog.exists():
             self._append_log("本地没有可复用的合约维表，不能跳过合约维表同步。")
             return False
@@ -249,14 +250,14 @@ class ContractUpdateService:
         return True
 
     def _quality_file_mtime(self) -> int | None:
-        quality_path = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "okx_1m_update_quality.json"
+        quality_path = CATALOG_ROOT / "okx_1m_update_quality.json"
         try:
             return quality_path.stat().st_mtime_ns
         except OSError:
             return None
 
     def _validate_update_quality(self, *, previous_mtime: int | None) -> None:
-        quality_path = DEFAULT_CRYPTO_V2_ROOT / "data" / "catalog" / "okx_1m_update_quality.json"
+        quality_path = CATALOG_ROOT / "okx_1m_update_quality.json"
         if not quality_path.exists():
             return
         try:
