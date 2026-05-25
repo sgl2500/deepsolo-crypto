@@ -79,7 +79,7 @@ def update_symbol(args, client, store: CandleStoreProtocol, raw_store: RawJsonlS
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Refresh recent OKX USDT SWAP 1m candles and rebuild aggregates.")
-    parser.add_argument("--source", choices=["relay", "okx"], default="okx")
+    parser.add_argument("--source", choices=["relay", "okx"], default="relay")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--symbols", nargs="*", default=[])
     parser.add_argument("--symbol-limit", type=int, default=None)

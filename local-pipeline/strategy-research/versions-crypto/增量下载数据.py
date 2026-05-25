@@ -166,7 +166,7 @@ def main() -> int:
     parser.add_argument("--symbols", nargs="*", default=[], help="只更新指定品种，如 BTC-USDT-SWAP")
     parser.add_argument("--sleep", type=float, default=0.05, help="请求间隔秒")
     parser.add_argument("--timeout", type=int, default=30)
-    parser.add_argument("--source", choices=["okx", "relay"], default="okx", help="行情源；relay 需要 OKX_RELAY_BASE_URL 或 --base-url")
+    parser.add_argument("--source", choices=["okx", "relay"], default="relay", help="行情源；默认走本地 relay 中转，直连 OKX 可传 okx")
     parser.add_argument("--base-url", default=None, help="覆盖行情源 base URL")
     parser.add_argument("--no-sync-instruments", action="store_true", help="跳过部署前合约维表同步")
     parser.add_argument("--coverage-days", type=int, default=3, help="检查最近N个完整日覆盖率")

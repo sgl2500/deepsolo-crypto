@@ -211,6 +211,8 @@ class ContractUpdateService:
         cmd = [
             _python_bin(),
             str(DEFAULT_STRATEGY_ROOT / "versions-crypto" / "增量下载数据.py"),
+            "--source",
+            "relay",
             "--limit",
             str(max(1, min(limit, 300))),
             "--coverage-days",

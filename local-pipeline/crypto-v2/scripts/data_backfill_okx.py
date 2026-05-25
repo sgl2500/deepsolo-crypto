@@ -156,8 +156,8 @@ def fetch_recent(client: OkxRestClient, inst_id: str, bar: str, retry_config: Re
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill OKX 1m candles into raw + normalized stores.")
-    parser.add_argument("--source", choices=["relay", "okx"], default="okx")
-    parser.add_argument("--base-url", default=None, help="Defaults to OKX official for --source okx. Relay source requires this or OKX_RELAY_BASE_URL.")
+    parser.add_argument("--source", choices=["relay", "okx"], default="relay")
+    parser.add_argument("--base-url", default=None, help="Override data source base URL.")
     parser.add_argument("--bar", default="1m", choices=["1m"])
     parser.add_argument("--symbols", nargs="*", default=[])
     parser.add_argument("--symbol-limit", type=int, default=None)

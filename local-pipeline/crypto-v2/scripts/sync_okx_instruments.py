@@ -31,7 +31,7 @@ def build_client(args):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync OKX USDT SWAP instrument dimension.")
-    parser.add_argument("--source", choices=["relay", "okx"], default="okx")
+    parser.add_argument("--source", choices=["relay", "okx"], default="relay")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument(

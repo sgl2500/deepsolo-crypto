@@ -13,13 +13,16 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+DEFAULT_RELAY_BASE_URL = "http://154.21.91.216:8000"
+
+
 class RelayError(RuntimeError):
     pass
 
 
 @dataclass(frozen=True, slots=True)
 class RelayClientConfig:
-    base_url: str = ""
+    base_url: str = DEFAULT_RELAY_BASE_URL
     api_key: str = ""
     secret_key: str = ""
     passphrase: str = ""
@@ -27,9 +30,12 @@ class RelayClientConfig:
 
     @classmethod
     def from_env(cls, base_url: str | None = None, timeout_seconds: int = 15) -> "RelayClientConfig":
-        resolved_base_url = base_url or os.getenv("OKX_RELAY_BASE_URL", "")
-        if not resolved_base_url:
-            raise RelayError("relay source requires OKX_RELAY_BASE_URL or --base-url")
+        resolved_base_url = (
+            base_url
+            or os.getenv("OKX_RELAY_BASE_URL", "")
+            or os.getenv("OKX_BASE_URL", "")
+            or DEFAULT_RELAY_BASE_URL
+        )
         return cls(
             base_url=resolved_base_url,
             api_key=os.getenv("OKX_API_KEY", ""),
