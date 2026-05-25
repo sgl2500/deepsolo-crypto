@@ -43,6 +43,8 @@ class ContractUpdateRequest(BaseModel):
     build_daily: bool = True
     daily_days: int = Field(default=10, ge=1, le=365)
     symbol_limit: int | None = Field(default=None, ge=1, le=1000)
+    symbols: list[str] | None = None
+    repair_start: str | None = Field(default=None, pattern=r"^\d{4}-?\d{2}-?\d{2}$")
 
 
 class ScreenerFavoriteCreate(BaseModel):
@@ -189,6 +191,8 @@ def start_contract_update_deploy(payload: ContractUpdateRequest) -> dict:
             build_daily=payload.build_daily,
             daily_days=payload.daily_days,
             symbol_limit=payload.symbol_limit,
+            symbols=payload.symbols,
+            repair_start=payload.repair_start,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

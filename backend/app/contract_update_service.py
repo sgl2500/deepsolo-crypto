@@ -51,6 +51,8 @@ class ContractUpdateService:
         build_daily: bool = True,
         daily_days: int = 10,
         symbol_limit: int | None = None,
+        symbols: list[str] | None = None,
+        repair_start: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             self._mark_dead_worker_locked()
@@ -77,6 +79,7 @@ class ContractUpdateService:
                 "data_root": str(DATA_ROOT),
                 "legacy_pipeline": USE_LEGACY_PIPELINE,
                 "options": {
+                    "mode": "repair" if repair_start else "update",
                     "force": force,
                     "backfill_history": backfill_history,
                     "pages": pages,
@@ -84,6 +87,8 @@ class ContractUpdateService:
                     "build_daily": build_daily,
                     "daily_days": daily_days,
                     "symbol_limit": symbol_limit,
+                    "symbols": symbols or [],
+                    "repair_start": repair_start,
                 },
             }
             self._write_state_locked()
@@ -98,6 +103,8 @@ class ContractUpdateService:
                     "build_daily": build_daily,
                     "daily_days": daily_days,
                     "symbol_limit": symbol_limit,
+                    "symbols": symbols,
+                    "repair_start": repair_start,
                 },
                 daemon=True,
             )
@@ -121,9 +128,11 @@ class ContractUpdateService:
         build_daily: bool,
         daily_days: int,
         symbol_limit: int | None,
+        symbols: list[str] | None,
+        repair_start: str | None,
     ) -> None:
         try:
-            self._append_log("开始更新部署：同步合约维表、刷新最新K线、重建聚合数据。")
+            self._append_log("开始更新部署：同步合约维表、修复完整日1m覆盖、刷新最新K线、重建聚合数据。")
             self._set_state(stage="validating", stage_label="检查脚本与数据目录")
             self._validate_paths()
 
@@ -134,6 +143,8 @@ class ContractUpdateService:
                 pages=pages,
                 limit=limit,
                 symbol_limit=symbol_limit,
+                symbols=symbols,
+                repair_start=repair_start,
             )
             try:
                 self._run_command("update_data", "更新合约与K线数据", update_cmd, DEFAULT_STRATEGY_ROOT / "versions-crypto")
@@ -149,6 +160,8 @@ class ContractUpdateService:
                     pages=pages,
                     limit=limit,
                     symbol_limit=symbol_limit,
+                    symbols=symbols,
+                    repair_start=repair_start,
                     skip_instrument_sync=True,
                 )
                 self._run_command(
@@ -160,7 +173,7 @@ class ContractUpdateService:
             self._validate_update_quality(previous_mtime=quality_mtime_before)
 
             if build_daily:
-                daily_cmd = self._daily_command(daily_days=daily_days, symbol_limit=symbol_limit)
+                daily_cmd = self._daily_command(daily_days=daily_days, symbol_limit=symbol_limit, symbols=symbols)
                 self._run_command("build_daily", "生成最近日线数据", daily_cmd, DEFAULT_CRYPTO_V2_ROOT)
 
             self._set_state(
@@ -206,6 +219,8 @@ class ContractUpdateService:
         pages: int | None,
         limit: int,
         symbol_limit: int | None,
+        symbols: list[str] | None,
+        repair_start: str | None,
         skip_instrument_sync: bool = False,
     ) -> list[str]:
         cmd = [
@@ -213,6 +228,7 @@ class ContractUpdateService:
             str(DEFAULT_STRATEGY_ROOT / "versions-crypto" / "增量下载数据.py"),
             "--source",
             "relay",
+            "--strict-coverage",
             "--limit",
             str(max(1, min(limit, 300))),
             "--coverage-days",
@@ -230,6 +246,10 @@ class ContractUpdateService:
             cmd += ["--pages", str(max(1, min(pages, 200)))]
         if symbol_limit is not None:
             cmd += ["--symbol-limit", str(max(1, symbol_limit))]
+        if symbols:
+            cmd += ["--symbols", *[symbol.strip().upper() for symbol in symbols if symbol.strip()]]
+        if repair_start:
+            cmd += ["--repair-start", repair_start]
         if skip_instrument_sync:
             cmd.append("--no-sync-instruments")
         return cmd
@@ -290,9 +310,11 @@ class ContractUpdateService:
                 "行情源当前不可用：本次K线刷新全部失败。请先确认 relay/OKX 网络可访问，稍后再执行更新部署。"
             )
 
-    def _daily_command(self, *, daily_days: int, symbol_limit: int | None) -> list[str]:
+    def _daily_command(self, *, daily_days: int, symbol_limit: int | None, symbols: list[str] | None) -> list[str]:
         today = datetime.now(CST).date()
-        start = today - timedelta(days=max(1, min(daily_days, 365)) - 1)
+        start = self._earliest_partition_date("candles_1H") or (
+            today - timedelta(days=max(1, min(daily_days, 365)) - 1)
+        )
         cmd = [
             _python_bin(),
             str(DEFAULT_CRYPTO_V2_ROOT / "scripts" / "build_daily_bars.py"),
@@ -305,7 +327,23 @@ class ContractUpdateService:
         ]
         if symbol_limit is not None:
             cmd += ["--symbol-limit", str(max(1, symbol_limit))]
+        if symbols:
+            cmd += ["--symbols", *[symbol.strip().upper() for symbol in symbols if symbol.strip()]]
         return cmd
+
+    def _earliest_partition_date(self, folder_name: str) -> datetime.date | None:
+        folder = DATA_ROOT / folder_name
+        if not folder.exists():
+            return None
+        dates = []
+        for path in folder.glob("date=*"):
+            if not path.is_dir():
+                continue
+            try:
+                dates.append(datetime.strptime(path.name.replace("date=", ""), "%Y-%m-%d").date())
+            except ValueError:
+                continue
+        return min(dates) if dates else None
 
     def _run_command(self, stage: str, label: str, cmd: list[str], cwd: Path) -> None:
         self._set_state(

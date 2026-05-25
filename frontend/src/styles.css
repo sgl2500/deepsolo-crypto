@@ -1854,6 +1854,10 @@ input {
   font-weight: 800;
 }
 
+.contract-update-main .contract-update-success {
+  color: #027a48;
+}
+
 .contract-update-meta {
   display: flex;
   gap: 18px;
@@ -1929,6 +1933,60 @@ input {
   background: #eef6ff;
   border: 1px solid #cfe4ff;
   border-radius: 999px;
+}
+
+.quality-report-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.contract-row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.repair-backdrop {
+  z-index: 27;
+}
+
+.repair-modal {
+  width: min(520px, calc(100vw - 48px));
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(3, 17, 29, 0.28);
+}
+
+.repair-modal .modal-head p {
+  margin: 6px 0 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.repair-form {
+  padding: 18px 24px 22px;
+}
+
+.repair-form label {
+  display: grid;
+  gap: 8px;
+}
+
+.repair-form span {
+  color: #344054;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.repair-form input {
+  height: 42px;
+  padding: 0 12px;
+  color: #111827;
+  background: #ffffff;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
 }
 
 .quality-backdrop {

@@ -2640,9 +2640,15 @@ function ContractListPage({
   const [contractQualityLoading, setContractQualityLoading] = useState(false);
   const [contractQualityError, setContractQualityError] = useState<string | null>(null);
   const [startingUpdate, setStartingUpdate] = useState(false);
+  const [repairTarget, setRepairTarget] = useState<string | null>(null);
+  const [repairAllOpen, setRepairAllOpen] = useState(false);
+  const [repairStartDate, setRepairStartDate] = useState("2026-01-01");
+  const [startingRepair, setStartingRepair] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const updateWasRunningRef = useRef(false);
+  const lastTaskModeRef = useRef<"update" | "repair" | null>(null);
 
   useEffect(() => {
     const current = currentTimeframe(summary, storagePeriod);
@@ -2680,6 +2686,10 @@ function ContractListPage({
     }
     if (!updateStatus || !updateWasRunningRef.current) return;
     updateWasRunningRef.current = false;
+    if (updateStatus.success) {
+      const mode = updateStatus.options?.mode === "repair" ? "repair" : lastTaskModeRef.current;
+      setUpdateNotice(mode === "repair" ? "补数完成，缺失1分钟K线已补齐并重建聚合数据。" : "更新部署完成。");
+    }
     void onSummaryRefresh();
     void loadContracts();
     void loadQualityOverview(true);
@@ -2749,7 +2759,9 @@ function ContractListPage({
   async function startUpdateDeploy() {
     setStartingUpdate(true);
     setError(null);
+    setUpdateNotice(null);
     try {
+      lastTaskModeRef.current = "update";
       const status = await startContractUpdateDeploy({
         force: true,
         limit: 300,
@@ -2761,6 +2773,31 @@ function ContractListPage({
       setError(err instanceof Error ? err.message : "更新部署启动失败");
     } finally {
       setStartingUpdate(false);
+    }
+  }
+
+  async function startRepairDeploy() {
+    if (!repairTarget && !repairAllOpen) return;
+    setStartingRepair(true);
+    setError(null);
+    setUpdateNotice(null);
+    try {
+      lastTaskModeRef.current = "repair";
+      const status = await startContractUpdateDeploy({
+        force: true,
+        limit: 300,
+        build_daily: true,
+        daily_days: 365,
+        symbols: repairTarget ? [repairTarget] : null,
+        repair_start: repairStartDate.replaceAll("-", ""),
+      });
+      setUpdateStatus(status);
+      setRepairTarget(null);
+      setRepairAllOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "补数部署启动失败");
+    } finally {
+      setStartingRepair(false);
     }
   }
 
@@ -2794,7 +2831,20 @@ function ContractListPage({
           >
             {updateRunning ? "更新中..." : startingUpdate ? "启动中..." : "更新部署"}
           </button>
-          <button className="secondary-action" onClick={() => void loadContracts()}>
+          <button
+            className="secondary-action"
+            disabled={startingRepair || updateRunning}
+            onClick={() => {
+              setRepairTarget(null);
+              setRepairAllOpen(true);
+              setRepairStartDate("2026-01-01");
+              setUpdateNotice(null);
+            }}
+          >
+            {startingRepair ? "启动中..." : "全部补数"}
+          </button>
+          <button
+            className="secondary-action" onClick={() => void loadContracts()}>
             刷新
           </button>
         </div>
@@ -2829,6 +2879,7 @@ function ContractListPage({
           <span>更新部署</span>
           <strong>{updateLabel}</strong>
           {updateStatus?.error && <em>{updateStatus.error}</em>}
+          {updateNotice && !updateStatus?.running && updateStatus?.success && <em className="contract-update-success">{updateNotice}</em>}
         </div>
         <div className="contract-update-meta">
           <span>数据目录：{updateStatus?.data_root ?? "等待状态"}</span>
@@ -2882,7 +2933,7 @@ function ContractListPage({
                 <th>最新K线时间</th>
                 <th>周期</th>
                 <th>状态</th>
-                <th>数据报告</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -2908,9 +2959,20 @@ function ContractListPage({
                     <td>{row.latest_time ?? "--"}</td>
                     <td>{timeframeLabels[data?.timeframe ?? storagePeriod] ?? data?.timeframe ?? storagePeriod}</td>
                     <td><span className="contract-status-badge">交易中</span></td>
-                    <td>
+                    <td className="contract-row-actions">
                       <button className="quality-report-button" onClick={() => void openContractQuality(row.inst_id)}>
                         报告
+                      </button>
+                      <button
+                        className="quality-report-button"
+                        disabled={updateRunning || startingRepair}
+                        onClick={() => {
+                          setRepairTarget(row.inst_id);
+                          setRepairStartDate("2026-01-01");
+                          setUpdateNotice(null);
+                        }}
+                      >
+                        补数
                       </button>
                     </td>
                   </tr>
@@ -2954,6 +3016,40 @@ function ContractListPage({
           setContractQualityError(null);
         }}
       />
+    )}
+    {(repairTarget || repairAllOpen) && (
+      <div className="modal-backdrop repair-backdrop" role="presentation" onMouseDown={() => {
+        setRepairTarget(null);
+        setRepairAllOpen(false);
+      }}>
+        <div className="repair-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="modal-head">
+            <div>
+              <h2>{repairTarget ? `补数：${repairTarget}` : "全部合约补数"}</h2>
+              <p>{repairTarget ? "按指定开始日期补齐该合约到昨日的缺失1分钟K线，并重建5分钟、15分钟、1小时和日线数据。" : "按指定开始日期补齐全部合约到昨日的缺失1分钟K线，并重建5分钟、15分钟、1小时和日线数据。"}</p>
+            </div>
+            <button className="close-button" onClick={() => {
+              setRepairTarget(null);
+              setRepairAllOpen(false);
+            }}>×</button>
+          </div>
+          <div className="repair-form">
+            <label>
+              <span>补数开始日期</span>
+              <input type="date" value={repairStartDate} onChange={(event) => setRepairStartDate(event.target.value)} />
+            </label>
+          </div>
+          <div className="modal-actions">
+            <button className="secondary-action" disabled={startingRepair} onClick={() => {
+              setRepairTarget(null);
+              setRepairAllOpen(false);
+            }}>取消</button>
+            <button className="primary-action" disabled={startingRepair || updateRunning || !repairStartDate} onClick={() => void startRepairDeploy()}>
+              {startingRepair ? "启动中..." : "开始补数"}
+            </button>
+          </div>
+        </div>
+      </div>
     )}
     </>
   );

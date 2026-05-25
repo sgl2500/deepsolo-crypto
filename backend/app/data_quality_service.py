@@ -89,6 +89,11 @@ class DataQualityService:
         report_details = report.get("details", []) if report else []
         top_contract_issues = self._top_contract_issues(report_details)
         report_symbols = int(report_summary.get("symbols") or 0) if isinstance(report_summary, dict) else 0
+        report_symbols_with_gaps = int(
+            report_summary.get("symbols_with_gaps")
+            or report_summary.get("dates_failed")
+            or 0
+        ) if isinstance(report_summary, dict) else 0
 
         issues: list[str] = []
         if selected_latest is None:
@@ -129,7 +134,7 @@ class DataQualityService:
                 "source": report.get("_source") if report else "",
                 "symbols": report_symbols,
                 "rows_total": int(report_summary.get("rows_total") or 0) if isinstance(report_summary, dict) else 0,
-                "symbols_with_gaps": int(report_summary.get("symbols_with_gaps") or 0) if isinstance(report_summary, dict) else 0,
+                "symbols_with_gaps": report_symbols_with_gaps,
                 "symbols_with_duplicates": int(report_summary.get("symbols_with_duplicates") or 0) if isinstance(report_summary, dict) else 0,
                 "symbols_with_unconfirmed": int(report_summary.get("symbols_with_unconfirmed") or 0) if isinstance(report_summary, dict) else 0,
             },
@@ -221,9 +226,15 @@ class DataQualityService:
     ) -> dict[str, Any]:
         partitions = self._date_partitions(timeframe)
         step = PERIOD_STEP_MS[timeframe]
+        cutoff_ts = self._complete_data_cutoff_ts(timeframe)
+        eligible_partitions = [
+            partition
+            for partition in partitions
+            if self._partition_bounds(timeframe, partition.date)[0] < cutoff_ts
+        ]
         expected_dates = [
             partition.date
-            for partition in partitions
+            for partition in eligible_partitions
             if self._is_expected_on_date(instrument, timeframe, partition.date)
         ]
         present_dates: list[str] = []
@@ -233,7 +244,7 @@ class DataQualityService:
         unconfirmed_rows = 0
         bad_rows = 0
 
-        for partition in partitions:
+        for partition in eligible_partitions:
             path = self._timeframe_dir(timeframe) / f"date={partition.date}" / f"{inst_id}.csv.gz"
             if not path.exists():
                 continue
@@ -243,6 +254,8 @@ class DataQualityService:
                     ts = self._to_int(row.get("ts"))
                     if ts is None:
                         bad_rows += 1
+                        continue
+                    if ts >= cutoff_ts:
                         continue
                     if ts in seen:
                         duplicate_rows += 1
@@ -314,7 +327,7 @@ class DataQualityService:
         for item in details:
             if not isinstance(item, dict):
                 continue
-            gaps = int(item.get("gaps") or 0)
+            gaps = int(item.get("gaps") or item.get("missing_after") or 0)
             duplicates = int(item.get("duplicates") or 0)
             unconfirmed = int(item.get("unconfirmed") or 0)
             score = gaps + duplicates + unconfirmed
@@ -325,8 +338,8 @@ class DataQualityService:
                     "inst_id": item.get("inst_id", ""),
                     "timeframe": item.get("bar", "1m"),
                     "rows": int(item.get("rows") or 0),
-                    "start": item.get("start"),
-                    "end": item.get("end"),
+                    "start": item.get("start") or item.get("date"),
+                    "end": item.get("end") or item.get("date"),
                     "gaps": gaps,
                     "duplicates": duplicates,
                     "unconfirmed": unconfirmed,
@@ -337,7 +350,7 @@ class DataQualityService:
         return [{key: value for key, value in item.items() if key != "_score"} for item in issues[:20]]
 
     def _best_quality_report(self) -> dict[str, Any] | None:
-        for name in ("okx_1m_update_quality.json", "okx_1m_quality.json"):
+        for name in ("okx_1m_repair_quality.json", "okx_1m_update_quality.json", "okx_1m_quality.json"):
             payload = self._read_json(self.catalog_dir / name)
             if isinstance(payload, dict):
                 payload["_source"] = name
@@ -486,6 +499,15 @@ class DataQualityService:
             start = datetime.combine(local_date, datetime_time(8, 0)).replace(tzinfo=ZoneInfo(APP_TIMEZONE))
         start_ts = int(start.timestamp() * 1000)
         return start_ts, start_ts + 24 * 60 * 60_000 - 1
+
+    def _complete_data_cutoff_ts(self, timeframe: str) -> int:
+        now = datetime.now(ZoneInfo(APP_TIMEZONE))
+        if timeframe == "1D":
+            cutoff = datetime.combine(now.date(), datetime_time.min).replace(tzinfo=ZoneInfo(APP_TIMEZONE))
+        else:
+            local_midnight = datetime.combine(now.date(), datetime_time.min).replace(tzinfo=ZoneInfo(APP_TIMEZONE))
+            cutoff = local_midnight
+        return int(cutoff.timestamp() * 1000)
 
     def _format_ts(self, value: int | str | None) -> str | None:
         ts = self._to_int(value)

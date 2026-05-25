@@ -323,6 +323,8 @@ export type ContractUpdatePayload = {
   build_daily?: boolean;
   daily_days?: number;
   symbol_limit?: number | null;
+  symbols?: string[] | null;
+  repair_start?: string | null;
 };
 
 export type IndicatorValuePreviewResponse = {

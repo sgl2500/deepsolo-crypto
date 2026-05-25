@@ -4,8 +4,8 @@
 增量下载数据
 
 用途：给 strategy-research/versions-crypto 下的研究脚本补最新K线数据。
-逻辑：默认调用 crypto-v2/scripts/data_update_okx.py，只重刷最近300根1m并重聚合5m/15m/1H。
-      只有明确传 --backfill-history 或 --pages，才调用历史补全 data_backfill_okx.py。
+逻辑：默认先逐合约检查完整日1m覆盖并修复到昨日，再重刷最近300根1m并重聚合5m/15m/1H。
+      只有明确传 --backfill-history 或 --pages，才调用旧的按页历史补全 data_backfill_okx.py。
 
 说明：只更新本地研究数据，不下单，不影响正在跑的实盘 bot。
 常用：
@@ -39,6 +39,8 @@ crypto_v2目录 = 本地流水线目录 / "crypto-v2"
 合约同步脚本 = crypto_v2目录 / "scripts/sync_okx_instruments.py"
 增量刷新脚本 = crypto_v2目录 / "scripts/data_update_okx.py"
 历史补全脚本 = crypto_v2目录 / "scripts/data_backfill_okx.py"
+完整日修复脚本 = crypto_v2目录 / "scripts/repair_1m_coverage.py"
+聚合重建脚本 = crypto_v2目录 / "scripts/rebuild_aggregates.py"
 品种清单 = 项目根目录 / "data/catalog/symbols_usdt_swap.json"
 
 sys.path.insert(0, str(crypto_v2目录 / "src"))
@@ -87,6 +89,26 @@ def 预期品种数量() -> int | None:
     return len(symbols) if isinstance(symbols, list) else None
 
 
+def 选择检查品种(args) -> list[str]:
+    if args.symbols:
+        return sorted(args.symbols)
+    if 合约维表.exists():
+        try:
+            symbols = select_instrument_symbols(合约维表, online_only=True)
+            return symbols[: args.symbol_limit] if args.symbol_limit else symbols
+        except Exception:
+            pass
+    try:
+        obj = json.loads(品种清单.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    symbols = obj.get("symbols") if isinstance(obj, dict) else None
+    if not isinstance(symbols, list):
+        return []
+    normalized = [str(item) for item in symbols if item]
+    return normalized[: args.symbol_limit] if args.symbol_limit else normalized
+
+
 def 估算页数(latest_date, min_pages: int, max_pages: int) -> int:
     if latest_date is None:
         return max_pages
@@ -121,10 +143,66 @@ def 同步合约维表(args) -> int:
     return run(cmd)
 
 
-def 最近完整日覆盖缺口(latest_date, today, days: int, threshold: float):
+def 修复完整日1m覆盖(args) -> int:
+    if args.no_repair_1m_coverage:
+        print("跳过完整日1m覆盖修复。")
+        return 0
+    cmd = [
+        sys.executable,
+        str(完整日修复脚本),
+        "--source", args.source,
+        "--timeout", str(args.timeout),
+        "--sleep", str(args.sleep),
+        "--normalized-root", str(标准化数据目录),
+        "--raw-root", str(原始数据目录),
+        "--catalog", str(项目根目录 / "data/catalog/okx_1m_repair_quality.json"),
+        "--symbol-catalog", str(品种清单),
+        "--dim-catalog", str(合约维表),
+        "--snapshot-dir", str(合约快照目录),
+        "--no-sync-instruments",
+    ]
+    if args.base_url:
+        cmd += ["--base-url", args.base_url]
+    if args.symbol_limit:
+        cmd += ["--symbol-limit", str(args.symbol_limit)]
+    if args.symbols:
+        cmd += ["--symbols", *args.symbols]
+    if args.repair_start:
+        cmd += ["--start", args.repair_start]
+    if args.repair_end:
+        cmd += ["--end", args.repair_end]
+    if args.strict_coverage:
+        cmd.append("--strict")
+    return run(cmd)
+
+
+def 重建聚合数据(args) -> int:
+    cmd = [
+        sys.executable,
+        str(聚合重建脚本),
+        "--normalized-root", str(标准化数据目录),
+        "--dim-catalog", str(合约维表),
+        "--symbol-catalog", str(品种清单),
+    ]
+    if args.symbol_limit:
+        cmd += ["--symbol-limit", str(args.symbol_limit)]
+    if args.symbols:
+        cmd += ["--symbols", *args.symbols]
+    return run(cmd)
+
+
+def 最近完整日覆盖缺口(
+    latest_date,
+    today,
+    days: int,
+    threshold: float,
+    *,
+    bar: str = "1m",
+    expected_symbols: list[str] | None = None,
+):
     if latest_date is None or not 合约维表.exists():
         return []
-    expected_symbols = select_instrument_symbols(合约维表, online_only=True)
+    expected_symbols = expected_symbols or select_instrument_symbols(合约维表, online_only=True)
     if not expected_symbols:
         return []
 
@@ -135,14 +213,14 @@ def 最近完整日覆盖缺口(latest_date, today, days: int, threshold: float)
     start_date = end_date - timedelta(days=days - 1)
     reports = summarize_range_coverage(
         标准化数据目录,
-        bar="5m",
+        bar=bar,
         start=start_date,
         end=end_date,
         expected_symbols=expected_symbols,
     )
     bad = [item for item in reports if item.full_ratio < threshold]
     if reports:
-        print("最近完整日5m覆盖率:")
+        print(f"最近完整日{bar}覆盖率:")
         for item in reports:
             print(
                 f"  {item.date}: expected={item.expected_symbols} "
@@ -169,6 +247,9 @@ def main() -> int:
     parser.add_argument("--source", choices=["okx", "relay"], default="relay", help="行情源；默认走本地 relay 中转，直连 OKX 可传 okx")
     parser.add_argument("--base-url", default=None, help="覆盖行情源 base URL")
     parser.add_argument("--no-sync-instruments", action="store_true", help="跳过部署前合约维表同步")
+    parser.add_argument("--no-repair-1m-coverage", action="store_true", help="跳过完整日1m覆盖检查与修复")
+    parser.add_argument("--repair-start", default=None, help="完整日1m修复起始日期，默认取本地最早1m日期")
+    parser.add_argument("--repair-end", default=None, help="完整日1m修复截止日期，默认到昨日")
     parser.add_argument("--coverage-days", type=int, default=3, help="检查最近N个完整日覆盖率")
     parser.add_argument("--coverage-threshold", type=float, default=0.95, help="完整合约覆盖率低于该值视为缺口")
     parser.add_argument("--no-auto-backfill-gaps", action="store_true", help="发现最近完整日缺口时不自动切换历史补全")
@@ -179,11 +260,16 @@ def main() -> int:
     if rc != 0:
         return rc
 
+    rc = 修复完整日1m覆盖(args)
+    if rc != 0:
+        return rc
+
     latest_5m = 最新数据日期("5m")
     latest_1m = 最新数据日期("1m")
     latest_1h = 最新数据日期("1H")
     today = 今天()
-    expected_symbols = 预期品种数量()
+    selected_symbols = 选择检查品种(args)
+    expected_symbols = len(selected_symbols) if selected_symbols else 预期品种数量()
     latest_5m_files = 日期文件数量("5m", latest_5m)
     print(f"本地1m最新日期: {latest_1m}")
     print(f"本地5m最新日期: {latest_5m}")
@@ -193,10 +279,12 @@ def main() -> int:
         print(f"预期合约品种数: {expected_symbols}")
     print(f"今天(CST): {today}")
     coverage_bad = 最近完整日覆盖缺口(
-        latest_5m,
+        latest_1m,
         today,
         args.coverage_days,
         args.coverage_threshold,
+        bar="1m",
+        expected_symbols=selected_symbols or None,
     )
     if coverage_bad:
         dates = ", ".join(item.date for item in coverage_bad)
@@ -210,7 +298,7 @@ def main() -> int:
     if today_partial:
         print("今天数据目录已存在但文件数明显不完整，将继续增量补齐。")
 
-    need_update = args.force or latest_5m is None or latest_5m < today or today_partial or bool(coverage_bad)
+    need_update = args.force or latest_5m is None or latest_5m < today or today_partial
     if args.check:
         print("需要更新" if need_update else "数据已到今天")
         return 0
@@ -218,10 +306,12 @@ def main() -> int:
         print("数据已到今天，跳过下载。需要强刷可加 --force")
         return 0
 
-    auto_backfill_gaps = bool(coverage_bad) and not args.no_auto_backfill_gaps
+    auto_backfill_gaps = False
     if coverage_bad and args.strict_coverage and not auto_backfill_gaps:
         print("覆盖率不达标，已按 --strict-coverage 停止。")
         return 1
+    if coverage_bad and not args.backfill_history and args.pages is None:
+        print("覆盖率不达标，但完整日修复已执行；默认不再使用按页历史补全。")
 
     use_backfill = args.backfill_history or args.pages is not None or auto_backfill_gaps
     if use_backfill:
@@ -283,6 +373,9 @@ def main() -> int:
 
     rc = run(cmd)
     print(f"数据脚本退出码: {rc}")
+    if rc == 0:
+        rc = 重建聚合数据(args)
+        print(f"聚合重建退出码: {rc}")
     print(f"更新后5m最新日期: {最新数据日期('5m')}")
     return rc
 
