@@ -116,6 +116,16 @@ class DataSourceService:
         normalized_timeframe = self._normalize_timeframe(timeframe)
         before = max(1, min(before, 300))
         after = max(0, min(after, 300))
+        if normalized_timeframe == "1D" and anchor_ts is not None:
+            synthetic_window = self._daily_kline_window_from_intraday(
+                date=date,
+                inst_id=inst_id,
+                anchor_ts=anchor_ts,
+                before=before,
+                after=after,
+            )
+            if synthetic_window is not None:
+                return synthetic_window
         dates = [item.date for item in self._date_partitions(self._timeframe_dir(normalized_timeframe))]
         if anchor_ts is not None:
             resolved_date = self._resolve_anchor_date(
@@ -196,6 +206,88 @@ class DataSourceService:
             "after_count": max(0, len(window_rows) - selected_anchor_index - 1),
             "returned_count": len(window_rows),
             "rows": window_rows,
+        }
+
+    def _daily_kline_window_from_intraday(
+        self,
+        *,
+        date: str | None,
+        inst_id: str,
+        anchor_ts: int,
+        before: int,
+        after: int,
+    ) -> dict[str, Any] | None:
+        anchor_date = self._local_date_from_ts(anchor_ts)
+        one_minute_dates = [item.date for item in self._date_partitions(self._timeframe_dir("1m"))]
+        if not any(self._contract_path("1m", item_date, inst_id).exists() for item_date in self._anchor_date_candidates("1m", anchor_ts)):
+            return None
+
+        daily_dates = [item.date for item in self._date_partitions(self._timeframe_dir("1D"))]
+        daily_window_dates = [
+            item_date
+            for item_date in daily_dates
+            if item_date < anchor_date and self._contract_path("1D", item_date, inst_id).exists()
+        ][-before:]
+        rows = self._read_contract_rows_for_dates("1D", daily_window_dates, inst_id)
+        partial_row = self._aggregate_daily_row_from_intraday(inst_id, anchor_date, anchor_ts, one_minute_dates)
+        if partial_row is None:
+            return None
+        rows.append(partial_row)
+        rows.sort(key=lambda item: self._to_int(item.get("ts")) or 0)
+
+        anchor_index = self._nearest_row_index(rows, anchor_ts)
+        if anchor_index is None:
+            return None
+        start = max(0, anchor_index - before)
+        end = min(len(rows), anchor_index + after + 1)
+        window_rows = [self._format_kline_row(row) for row in rows[start:end]]
+        selected_anchor = rows[anchor_index]
+        selected_anchor_ts = self._to_int(selected_anchor.get("ts")) or anchor_ts
+        selected_anchor_index = anchor_index - start
+        return {
+            "timeframe": "1D",
+            "date": anchor_date,
+            "inst_id": inst_id,
+            "anchor_ts": selected_anchor_ts,
+            "anchor_time": self._format_ts(str(selected_anchor_ts)),
+            "anchor_index": selected_anchor_index,
+            "before": before,
+            "after": after,
+            "before_count": selected_anchor_index,
+            "after_count": max(0, len(window_rows) - selected_anchor_index - 1),
+            "returned_count": len(window_rows),
+            "rows": window_rows,
+        }
+
+    def _aggregate_daily_row_from_intraday(
+        self,
+        inst_id: str,
+        local_date: str,
+        anchor_ts: int,
+        one_minute_dates: list[str],
+    ) -> dict[str, str] | None:
+        day_start_ts = self._local_day_start_ts(local_date)
+        rows: list[dict[str, str]] = []
+        for item_date in self._anchor_date_candidates("1m", anchor_ts):
+            if item_date not in one_minute_dates:
+                continue
+            rows.extend(self._read_contract_rows_for_dates("1m", [item_date], inst_id))
+        filtered = [
+            row for row in rows
+            if (ts := self._to_int(row.get("ts"))) is not None and day_start_ts <= ts <= anchor_ts
+        ]
+        if not filtered:
+            return None
+        filtered.sort(key=lambda item: self._to_int(item.get("ts")) or 0)
+        return {
+            "ts": str(day_start_ts),
+            "open": filtered[0].get("open", ""),
+            "high": self._max_numeric_text(row.get("high") for row in filtered),
+            "low": self._min_numeric_text(row.get("low") for row in filtered),
+            "close": filtered[-1].get("close", ""),
+            "vol": self._sum_numeric_text(row.get("vol") for row in filtered),
+            "vol_ccy": self._sum_numeric_text(row.get("vol_ccy") for row in filtered),
+            "vol_ccy_quote": self._sum_numeric_text(row.get("vol_ccy_quote") for row in filtered),
         }
 
     def active_contracts(
@@ -391,6 +483,13 @@ class DataSourceService:
                     candidates.append(item)
         return candidates
 
+    def _local_date_from_ts(self, ts: int) -> str:
+        return datetime.fromtimestamp(ts / 1000, tz=ZoneInfo(APP_TIMEZONE)).date().isoformat()
+
+    def _local_day_start_ts(self, date: str) -> int:
+        dt = datetime.fromisoformat(f"{date}T00:00:00").replace(tzinfo=ZoneInfo(APP_TIMEZONE))
+        return int(dt.timestamp() * 1000)
+
     def _read_contract_rows_for_dates(
         self,
         timeframe: str,
@@ -437,6 +536,22 @@ class DataSourceService:
             "vol_ccy": self._to_float(row.get("vol_ccy")),
             "vol_ccy_quote": self._to_float(row.get("vol_ccy_quote")),
         }
+
+    def _sum_numeric_text(self, values: Any) -> str:
+        total = 0.0
+        for value in values:
+            parsed = self._to_float(value)
+            if parsed is not None:
+                total += parsed
+        return f"{total:.12g}"
+
+    def _max_numeric_text(self, values: Any) -> str:
+        parsed_values = [parsed for value in values if (parsed := self._to_float(value)) is not None]
+        return f"{max(parsed_values):.12g}" if parsed_values else ""
+
+    def _min_numeric_text(self, values: Any) -> str:
+        parsed_values = [parsed for value in values if (parsed := self._to_float(value)) is not None]
+        return f"{min(parsed_values):.12g}" if parsed_values else ""
 
     def _parse_local_time(self, date: str, time_text: str | None) -> int | None:
         if not time_text:

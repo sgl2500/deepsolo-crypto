@@ -126,6 +126,13 @@ type ScreenerTableRow = ScreenerRow & {
   rowIndex: number;
 };
 
+type KlineTarget = {
+  instId: string;
+  anchorTs?: number | null;
+  baselineTs?: number | null;
+  baselineTime?: string | null;
+};
+
 type KlineTradeMarker = {
   side: "buy" | "sell";
   ts: number;
@@ -150,7 +157,7 @@ export default function App() {
   const [favoriteSaving, setFavoriteSaving] = useState(false);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [favoriteNotice, setFavoriteNotice] = useState<string | null>(null);
-  const [klineTarget, setKlineTarget] = useState<{ instId: string; anchorTs?: number | null } | null>(null);
+  const [klineTarget, setKlineTarget] = useState<KlineTarget | null>(null);
   const [klinePeriod, setKlinePeriod] = useState("1D");
   const [klineData, setKlineData] = useState<ContractKlineResponse | null>(null);
   const [klineLoading, setKlineLoading] = useState(false);
@@ -384,7 +391,12 @@ export default function App() {
       setKlineError("请先选择基准时间。");
       return;
     }
-    const target = { instId: row.inst_id, anchorTs: row.latest_ts };
+    const target = {
+      instId: row.inst_id,
+      anchorTs: row.latest_ts,
+      baselineTs: row.latest_ts,
+      baselineTime: row.latest_time || asOfDisplayLabel,
+    };
     const period = "1D";
     setKlineTarget(target);
     setKlinePeriod(period);
@@ -397,7 +409,7 @@ export default function App() {
     await loadKlineWindow(klineTarget, period);
   }
 
-  async function loadKlineWindow(target: { instId: string; anchorTs?: number | null }, period: string) {
+  async function loadKlineWindow(target: KlineTarget, period: string) {
     if (!date) return;
     setKlineData(null);
     setKlineLoading(true);
@@ -407,7 +419,7 @@ export default function App() {
         instId: target.instId,
         timeframe: period,
         date: result?.date || date,
-        anchorTs: target.anchorTs,
+        anchorTs: klineRequestAnchorTs(target, period),
         before: 33,
         after: 33,
       });
@@ -942,7 +954,7 @@ function ContractKlineModal({
   onPeriodChange,
   onClose,
 }: {
-  target: { instId: string; anchorTs?: number | null };
+  target: KlineTarget;
   activePeriod: string;
   data: ContractKlineResponse | null;
   loading: boolean;
@@ -988,12 +1000,12 @@ function ContractKlineModal({
                 <strong>{klinePeriodLabel(data.timeframe)}</strong>
               </div>
               <div>
-                <span>基准日期</span>
-                <strong>{formatDateBadge(data.date)}</strong>
+                <span>选币基准</span>
+                <strong>{formatKlineDisplayTime(target.baselineTime) || formatKlineDisplayTime(data.anchor_time) || "--"}</strong>
               </div>
               <div>
-                <span>基准K线</span>
-                <strong>{data.anchor_time ?? "--"}</strong>
+                <span>锚定K线</span>
+                <strong>{formatKlineDisplayTime(data.anchor_time) || "--"}</strong>
               </div>
               <div>
                 <span>已返回</span>
@@ -4362,6 +4374,12 @@ function klinePeriodLabel(period: string) {
   return klinePeriodOptions.find((option) => option.value === period)?.label ?? timeframeLabels[period] ?? period;
 }
 
+function klineRequestAnchorTs(target: KlineTarget, period: string) {
+  const baselineTs = target.baselineTs ?? target.anchorTs;
+  if (baselineTs == null) return target.anchorTs;
+  return baselineTs;
+}
+
 function anomalyConditionPreview(event: SignalEvent) {
   const conditions = event.matched_conditions || [];
   if (conditions.length === 0) return "--";
@@ -4869,6 +4887,13 @@ function formatShanghaiDateTimeBadge(value: number) {
   const hour = String(date.getUTCHours()).padStart(2, "0");
   const minute = String(date.getUTCMinutes()).padStart(2, "0");
   return `${year}${month}${day} ${hour}:${minute}`;
+}
+
+function formatKlineDisplayTime(value: string | null | undefined) {
+  if (!value) return "";
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+  if (!match) return value;
+  return `${match[1]}${match[2]}${match[3]} ${match[4]}${match[5]}`;
 }
 
 function weekdayLabel(value: string) {
