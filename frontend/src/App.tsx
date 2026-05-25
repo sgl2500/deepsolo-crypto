@@ -406,7 +406,7 @@ export default function App() {
       const data = await fetchContractKlineWindow({
         instId: target.instId,
         timeframe: period,
-        date,
+        date: result?.date || date,
         anchorTs: target.anchorTs,
         before: 33,
         after: 33,
@@ -4462,27 +4462,16 @@ function conditionTimeSubtitle(
   dates: Array<{ date: string; file_count: number }>,
   asOfTime: string,
 ) {
-  if (condition.timeMode === "previous_trading_day") {
-    const targetDate = conditionTargetDate(condition, date, dates, asOfTime);
-    const suffix = targetDate ? ` ${formatDateBadge(targetDate)}` : "";
-    return `前${condition.timeOffset || "N"}个交易日${suffix}${conditionTimePointSuffix(condition)}`;
+  if (!metadataPeriodAllowsTime(condition.indicator.storage_period)) {
+    const targetDate = conditionTargetLocalDate(condition, date, dates);
+    return formatDateBadge(targetDate) || "当前交易日";
   }
-  if (condition.timeMode === "current_trading_day") {
-    if (!metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
-      const targetDate = conditionTargetDate(condition, date, dates, asOfTime);
-      return `${formatDateBadge(targetDate) || "上一完整日线"} 完整日线`;
-    }
-    return `${formatDateBadge(date) || "当前交易日"}${conditionTimePointSuffix(condition)}`;
+  const targetTs = conditionTargetLocalTimestamp(condition, date, dates, asOfTime);
+  if (targetTs !== null) {
+    return formatShanghaiDateTimeBadge(targetTs);
   }
-  if (!metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
-    const targetDate = conditionTargetDate(condition, date, dates, asOfTime);
-    return `${formatDateBadge(targetDate) || "上一完整日线"} 完整日线`;
-  }
-  return `最新可用时间${conditionTimePointSuffix(condition)}`;
-}
-
-function conditionTimePointSuffix(condition: MetadataCondition) {
-  return conditionTimePointText(condition);
+  const targetDate = conditionTargetLocalDate(condition, date, dates);
+  return formatDateBadge(targetDate) || "当前交易日";
 }
 
 function conditionTimePointText(condition: MetadataCondition) {
@@ -4673,35 +4662,55 @@ function conditionTargetDate(
   dates: Array<{ date: string; file_count: number }>,
   asOfTime = "",
 ) {
-  if (!metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime && condition.timeMode !== "previous_trading_day") {
-    return previousAvailableDate(date, dates);
-  }
+  const targetLocalDate = conditionTargetLocalDate(condition, date, dates);
   if (condition.timeMode !== "previous_trading_day") {
     if (metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
-      return conditionTargetPartitionDate(condition, date, asOfTime);
+      return conditionTargetPartitionDate(condition, targetLocalDate, asOfTime);
     }
-    return date;
-  }
-  const offset = Math.max(1, Number.parseInt(condition.timeOffset, 10) || 1);
-  const currentIndex = dates.findIndex((item) => item.date === date);
-  let targetDate = date;
-  if (currentIndex >= 0) {
-    targetDate = dates[currentIndex + offset]?.date ?? dates[dates.length - 1]?.date ?? date;
-  } else {
-    const ascending = dates.map((item) => item.date).slice().sort();
-    const insertAt = ascending.findIndex((item) => item >= date);
-    const baseIndex = insertAt >= 0 ? insertAt : ascending.length;
-    targetDate = ascending[Math.max(0, baseIndex - offset)] ?? date;
+    return targetLocalDate;
   }
   if (metadataPeriodAllowsTime(condition.indicator.storage_period) && asOfTime) {
-    return conditionTargetPartitionDate(condition, targetDate, asOfTime);
+    return conditionTargetPartitionDate(condition, targetLocalDate, asOfTime);
   }
-  return targetDate;
+  return targetLocalDate;
+}
+
+function conditionTargetLocalDate(
+  condition: MetadataCondition,
+  date: string,
+  dates: Array<{ date: string; file_count: number }>,
+) {
+  if (condition.timeMode !== "previous_trading_day") return date;
+  const offset = Math.max(1, Number.parseInt(condition.timeOffset, 10) || 1);
+  const currentIndex = dates.findIndex((item) => item.date === date);
+  if (currentIndex >= 0) {
+    return dates[currentIndex + offset]?.date ?? dates[dates.length - 1]?.date ?? date;
+  }
+  const ascending = dates.map((item) => item.date).slice().sort();
+  const insertAt = ascending.findIndex((item) => item >= date);
+  const baseIndex = insertAt >= 0 ? insertAt : ascending.length;
+  return ascending[Math.max(0, baseIndex - offset)] ?? date;
 }
 
 function conditionTargetPartitionDate(condition: MetadataCondition, date: string, asOfTime: string) {
+  const targetTs = conditionTargetTimestampOnDate(condition, date, asOfTime);
+  if (targetTs === null) return date;
+  return new Date(targetTs).toISOString().slice(0, 10);
+}
+
+function conditionTargetLocalTimestamp(
+  condition: MetadataCondition,
+  date: string,
+  dates: Array<{ date: string; file_count: number }>,
+  asOfTime: string,
+) {
+  const targetDate = conditionTargetLocalDate(condition, date, dates);
+  return conditionTargetTimestampOnDate(condition, targetDate, asOfTime);
+}
+
+function conditionTargetTimestampOnDate(condition: MetadataCondition, date: string, asOfTime: string) {
   const baseTs = shanghaiLocalTimestamp(date, asOfTime);
-  if (baseTs === null) return date;
+  if (baseTs === null) return null;
   const mode = conditionTimePointMode(condition);
   let targetTs = baseTs;
   if (mode === "bar_offset") {
@@ -4715,7 +4724,7 @@ function conditionTargetPartitionDate(condition: MetadataCondition, date: string
     const fixedTs = shanghaiLocalTimestamp(date, condition.timePoint);
     if (fixedTs !== null) targetTs = fixedTs;
   }
-  return new Date(targetTs).toISOString().slice(0, 10);
+  return targetTs;
 }
 
 function shanghaiLocalTimestamp(date: string, time: string) {
@@ -4729,15 +4738,6 @@ function shanghaiLocalTimestamp(date: string, time: string) {
   const minute = Number.parseInt(timeMatch[2], 10);
   const second = timeMatch[3] ? Number.parseInt(timeMatch[3], 10) : 0;
   return Date.UTC(year, month - 1, day, hour - 8, minute, second);
-}
-
-function previousAvailableDate(date: string, dates: Array<{ date: string; file_count: number }>) {
-  const currentIndex = dates.findIndex((item) => item.date === date);
-  if (currentIndex >= 0) return dates[currentIndex + 1]?.date ?? dates[dates.length - 1]?.date ?? date;
-  const ascending = dates.map((item) => item.date).slice().sort();
-  const insertAt = ascending.findIndex((item) => item >= date);
-  const baseIndex = insertAt >= 0 ? insertAt : ascending.length;
-  return ascending[Math.max(0, baseIndex - 1)] ?? date;
 }
 
 function preferredQueryDate(timeframe: TimeframeSummary) {
@@ -4858,6 +4858,17 @@ function localDateString() {
 function formatDateBadge(value: string) {
   if (!value) return "";
   return value.replaceAll("-", "");
+}
+
+function formatShanghaiDateTimeBadge(value: number) {
+  const date = new Date(value + 8 * 60 * 60 * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hour = String(date.getUTCHours()).padStart(2, "0");
+  const minute = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${year}${month}${day} ${hour}:${minute}`;
 }
 
 function weekdayLabel(value: string) {

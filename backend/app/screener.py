@@ -586,9 +586,7 @@ def _condition_target_local_date(
     reference_date = _local_date_from_ts(as_of_ts) if as_of_ts is not None else selected_date
     if condition.get("time_mode") != "previous_trading_day":
         if _period_step_minutes(period) is None and as_of_ts is not None:
-            # At an intraday global baseline, a 1D condition can only see the
-            # previous completed daily candle; the current daily candle is not final.
-            return _available_date_offset_before(period, reference_date, 1) or _date_offset(reference_date, -1)
+            return reference_date
         return reference_date
 
     offset = _positive_int(condition.get("time_offset"), default=1)

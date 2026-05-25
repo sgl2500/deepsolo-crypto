@@ -117,6 +117,15 @@ class DataSourceService:
         before = max(1, min(before, 300))
         after = max(0, min(after, 300))
         dates = [item.date for item in self._date_partitions(self._timeframe_dir(normalized_timeframe))]
+        if anchor_ts is not None:
+            resolved_date = self._resolve_anchor_date(
+                normalized_timeframe,
+                dates,
+                inst_id,
+                anchor_ts,
+            )
+            if resolved_date:
+                date = resolved_date
         if not date or date not in dates:
             date = self._resolve_anchor_date(
                 normalized_timeframe,
@@ -401,17 +410,19 @@ class DataSourceService:
     def _nearest_row_index(self, rows: list[dict[str, str]], anchor_ts: int) -> int | None:
         if not rows:
             return None
-        best_index: int | None = None
-        best_distance: int | None = None
+        first_index: int | None = None
+        selected_index: int | None = None
         for index, row in enumerate(rows):
             ts = self._to_int(row.get("ts"))
             if ts is None:
                 continue
-            distance = abs(ts - anchor_ts)
-            if best_distance is None or distance < best_distance:
-                best_index = index
-                best_distance = distance
-        return best_index
+            if first_index is None:
+                first_index = index
+            if ts <= anchor_ts:
+                selected_index = index
+                continue
+            break
+        return selected_index if selected_index is not None else first_index
 
     def _format_kline_row(self, row: dict[str, str]) -> dict[str, Any]:
         ts = self._to_int(row.get("ts"))
