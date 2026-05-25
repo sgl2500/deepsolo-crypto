@@ -377,7 +377,7 @@ def _match_metadata_filters(
                 inst_id,
                 condition_as_of_ts,
             )
-            if source_row is not None and condition.get("match_current_bar"):
+            if source_row is not None and condition.get("match_current_bar", True):
                 source_ts = _to_int(source_row.get("ts"))
                 target_ts = condition_as_of_ts
                 if target_ts is None and _period_step_minutes(indicator_period) is not None:

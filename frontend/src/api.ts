@@ -80,6 +80,7 @@ export type ScreenerMetadataFilterPayload = {
   external_relation?: boolean;
   time_range?: boolean;
   exclude?: boolean;
+  match_current_bar?: boolean;
 };
 
 export type Indicator = {
@@ -925,7 +926,7 @@ export async function createBacktestRun(payload: BacktestRunRequest): Promise<Ba
     },
     {
       timeoutMs: 120_000,
-      timeoutMessage: "回测请求超时：超过 120 秒还没有返回，请缩短日期区间或改成每日一次扫描。",
+      timeoutMessage: "回测请求超时：超过 120 秒还没有返回，请缩短日期区间。",
     },
   );
 }

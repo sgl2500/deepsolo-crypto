@@ -63,7 +63,7 @@ class BacktestRunRequest(BaseModel):
     start_date: str
     end_date: str
     signal_timeframe: str = "1H"
-    signal_mode: str = "daily"
+    signal_mode: str = "each_bar_close"
     entry_timeframe: str = "1m"
     hold_hours: int = Field(default=24, ge=1, le=720)
     position_usdt: float = Field(default=100, gt=0)
@@ -79,7 +79,7 @@ class SignalSetCreateRequest(BaseModel):
     start_date: str
     end_date: str
     signal_timeframe: str = "1H"
-    signal_mode: str = "daily"
+    signal_mode: str = "each_bar_close"
     checkpoint_limit: int = Field(default=500, ge=1, le=5000)
 
 

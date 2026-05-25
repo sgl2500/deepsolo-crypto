@@ -73,9 +73,6 @@ const klinePeriodOptions = [
 ];
 const backtestSignalTimeframeOptions = [
   { value: "1H", label: "1小时扫描" },
-  { value: "5m", label: "5分钟扫描" },
-  { value: "1m", label: "1分钟扫描" },
-  { value: "1D", label: "日线扫描" },
 ];
 const backtestEntryTimeframeOptions = [
   { value: "1m", label: "1分钟成交" },
@@ -83,8 +80,7 @@ const backtestEntryTimeframeOptions = [
   { value: "1H", label: "1小时成交" },
 ];
 const backtestSignalModeOptions = [
-  { value: "daily", label: "每日一次" },
-  { value: "each_bar_close", label: "逐根K线" },
+  { value: "each_bar_close", label: "逐根K线扫描" },
 ];
 
 const metadataOperatorOptions = [
@@ -117,6 +113,7 @@ type MetadataConditionDraft = {
   externalRelation: boolean;
   timeRange: boolean;
   exclude: boolean;
+  matchCurrentBar: boolean;
 };
 
 type MetadataCondition = MetadataConditionDraft & {
@@ -907,7 +904,7 @@ function ScreenerFavoritesModal({
                 <button className="favorite-apply-area" onClick={() => onApply(favorite)}>
                   <div className="favorite-card-top">
                     <strong>{favorite.name}</strong>
-                    <span>{timeframeLabels[favorite.timeframe] ?? favorite.timeframe}</span>
+                    <span>{favoriteTimeframeLabel(favorite.timeframe)}</span>
                   </div>
                   <div className="favorite-card-meta">
                     <span>{favorite.condition_count} 个条件</span>
@@ -1349,7 +1346,7 @@ function AnomalyEvidenceModal({
 }
 
 function BacktestPage({ summary }: { summary: DataSummary | null }) {
-  const initialRange = suggestedBacktestRange(summary, "1H", "daily");
+  const initialRange = suggestedBacktestRange(summary, "1H", "each_bar_close");
   const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
   const [signalSets, setSignalSets] = useState<SignalSet[]>([]);
   const [signalEvents, setSignalEvents] = useState<SignalEvent[]>([]);
@@ -1363,7 +1360,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     startDate: initialRange.start,
     endDate: initialRange.end,
     signalTimeframe: "1H",
-    signalMode: "daily",
+    signalMode: "each_bar_close",
     side: "short",
     entryTimeframe: "5m",
     entryRule: "consecutive_green_bars",
@@ -1598,18 +1595,16 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     setForm((current) => ({
       ...current,
       signalTimeframe: value,
-      signalMode: value === "1D" && current.signalMode === "each_bar_close" ? "daily" : current.signalMode,
       startDate: nextRange.start,
       endDate: nextRange.end,
     }));
   }
 
   function changeSignalMode(value: string) {
-    const normalizedMode = form.signalTimeframe === "1D" && value === "each_bar_close" ? "daily" : value;
-    const nextRange = suggestedBacktestRange(summary, form.signalTimeframe, normalizedMode);
+    const nextRange = suggestedBacktestRange(summary, form.signalTimeframe, value);
     setForm((current) => ({
       ...current,
-      signalMode: normalizedMode,
+      signalMode: value,
       startDate: nextRange.start,
       endDate: nextRange.end,
     }));
@@ -1710,7 +1705,6 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const trades = result?.trades ?? [];
   const checkpoints = result?.checkpoints ?? [];
   const equityPoints = result?.daily_equity?.length ? result.daily_equity : result?.equity ?? [];
-  const signalModeDisabled = form.signalTimeframe === "1D";
   const tradeKlinePeriod = activeRun?.config.entry_timeframe ?? form.entryTimeframe;
   const selectedSignalSummary = selectedSignalSet?.summary ?? null;
   const canStartBacktest = Boolean(form.signalSetId && selectedSignalSet?.status === "completed");
@@ -1821,11 +1815,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
                 <span>异动扫描频率</span>
                 <select value={form.signalMode} onChange={(event) => changeSignalMode(event.target.value)}>
                   {backtestSignalModeOptions.map((option) => (
-                    <option
-                      disabled={signalModeDisabled && option.value === "each_bar_close"}
-                      key={option.value}
-                      value={option.value}
-                    >
+                    <option key={option.value} value={option.value}>
                       {option.label}
                     </option>
                   ))}
@@ -2078,9 +2068,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
       {generatingSignalSet && (
         <EmptyState
           title="正在提交异动表后台任务"
-          text={form.signalMode === "each_bar_close"
-            ? "提交成功后后端会继续逐根K线扫描，页面会自动轮询任务状态。"
-            : "提交成功后后端会按每日一次扫描，页面会自动轮询任务状态。"}
+          text="提交成功后后端会按1小时K线逐根扫描，页面会自动轮询任务状态。"
         />
       )}
       {running && <EmptyState title="正在回测" text="先从异动表寻找入场，再按止损和到期规则模拟出场。" />}
@@ -3333,7 +3321,7 @@ function IndicatorProductionPage({ summary }: { summary: DataSummary | null }) {
         data_type: "number",
         unit: "",
         source_type: "script",
-        description: "脚本生产指标，等待配置脚本、运行和部署。",
+        description: "脚本生产指标，可在选币条件中引用。",
       } as const;
       if (editingTarget) {
         await updateIndicator(editingTarget.id, payload);
@@ -3393,7 +3381,7 @@ function IndicatorProductionPage({ summary }: { summary: DataSummary | null }) {
             <article className="script-indicator-card" key={item.id}>
               <div className="script-card-top">
                 <span>脚本指标</span>
-                <b>草稿</b>
+                <b>可用于选币</b>
               </div>
               <h2>{item.name_zh}</h2>
               <p>{item.id}</p>
@@ -4259,6 +4247,7 @@ function defaultMetadataConditionDraft(): MetadataConditionDraft {
     externalRelation: false,
     timeRange: false,
     exclude: false,
+    matchCurrentBar: true,
   };
 }
 
@@ -4279,6 +4268,7 @@ function draftFromCondition(condition: MetadataCondition): MetadataConditionDraf
     externalRelation: condition.externalRelation,
     timeRange: condition.timeRange,
     exclude: condition.exclude,
+    matchCurrentBar: condition.matchCurrentBar,
   };
 }
 
@@ -4299,6 +4289,7 @@ function toMetadataFilterPayload(condition: MetadataCondition): ScreenerMetadata
     external_relation: condition.externalRelation,
     time_range: condition.timeRange,
     exclude: condition.exclude,
+    match_current_bar: condition.indicator.source_type === "script" ? condition.matchCurrentBar : undefined,
   };
 }
 
@@ -4321,6 +4312,7 @@ function toFavoriteCondition(condition: MetadataCondition): ScreenerFavoriteCond
     external_relation: condition.externalRelation,
     time_range: condition.timeRange,
     exclude: condition.exclude,
+    match_current_bar: condition.indicator.source_type === "script" ? condition.matchCurrentBar : undefined,
   };
 }
 
@@ -4344,6 +4336,7 @@ function fromFavoriteCondition(condition: ScreenerFavoriteCondition): MetadataCo
     externalRelation: Boolean(condition.external_relation),
     timeRange: Boolean(condition.time_range),
     exclude: Boolean(condition.exclude),
+    matchCurrentBar: condition.match_current_bar ?? condition.indicator.source_type === "script",
   };
 }
 
@@ -4359,6 +4352,10 @@ function favoriteConditionText(condition: ScreenerFavoriteCondition) {
   const restored = fromFavoriteCondition(condition);
   if (!restored) return condition.indicator_id;
   return `${restored.indicator.name_zh} ${metadataConditionText(restored)}`;
+}
+
+function favoriteTimeframeLabel(timeframe: string) {
+  return `按${timeframeLabels[timeframe] ?? timeframe}K线聚合计算`;
 }
 
 function klinePeriodLabel(period: string) {

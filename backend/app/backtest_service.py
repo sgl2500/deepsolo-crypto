@@ -415,7 +415,7 @@ class BacktestService:
         checkpoint_limit = int(config.get("checkpoint_limit") or MAX_CHECKPOINTS)
         if len(checkpoints) > checkpoint_limit:
             raise ValueError(
-                f"异动扫描检查点过多：{len(checkpoints)} 个，当前上限 {checkpoint_limit}；请缩短日期区间或改为每日一次。"
+                f"异动扫描检查点过多：{len(checkpoints)} 个，当前上限 {checkpoint_limit}；请缩短日期区间。"
             )
         return checkpoints
 
@@ -464,7 +464,7 @@ class BacktestService:
         if start_date > end_date:
             raise ValueError("开始日期不能晚于结束日期")
 
-        signal_mode = str(payload.get("signal_mode") or "daily")
+        signal_mode = str(payload.get("signal_mode") or "each_bar_close")
         if signal_mode == "hourly":
             signal_mode = "each_bar_close"
         if signal_mode not in {"daily", "each_bar_close"}:
@@ -473,7 +473,7 @@ class BacktestService:
         signal_timeframe = _normalize_timeframe(str(payload.get("signal_timeframe") or favorite.get("timeframe") or "1H"))
         entry_timeframe = _normalize_timeframe(str(payload.get("entry_timeframe") or "1m"))
         if signal_mode == "each_bar_close" and _period_ms(signal_timeframe) >= 24 * 60 * 60 * 1000:
-            raise ValueError("逐根K线扫描不支持日线周期，请选择 1H/5m/1m 或改为每日一次")
+            raise ValueError("逐根K线扫描不支持日线周期，请选择 1H/5m/1m")
 
         return {
             "favorite_id": favorite["id"],
