@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import ConfigProvider from "antd/es/config-provider";
 import Table from "antd/es/table";
 import type { ColumnsType } from "antd/es/table";
@@ -15,6 +15,7 @@ import {
   DataSummary,
   Indicator,
   IndicatorCatalogResponse,
+  LiveStrategy,
   ScreenerFavorite,
   ScreenerFavoriteCondition,
   SignalEvent,
@@ -26,6 +27,7 @@ import {
   ScreenerRow,
   ScreenerTimeCountItem,
   createBacktestRunFromSignalSet,
+  createLiveStrategyFromBacktest,
   createScreenerFavorite,
   createSignalSet,
   TimeframeSummary,
@@ -42,6 +44,8 @@ import {
   fetchDataQualitySummary,
   fetchIndicatorValuePreview,
   fetchIndicators,
+  fetchLiveStrategies,
+  fetchLiveStrategy,
   fetchScreenerFavorites,
   fetchSignalSet,
   fetchSignalSetEvents,
@@ -51,13 +55,17 @@ import {
   fetchSummary,
   generateScriptWithAi,
   queryScreener,
+  refreshLiveStrategyBacktest,
+  renameLiveStrategy,
+  runLiveStrategyShadow,
   saveScriptIndicatorScript,
   startContractUpdateDeploy,
   trialRunScriptIndicator,
   updateIndicator,
+  updateLiveStrategyStatus,
 } from "./api";
 
-const navItems = ["选币查询", "回测验证", "合约列表", "指标生产", "指标仓库"];
+const navItems = ["选币查询", "回测验证", "实盘跟踪", "合约列表", "指标生产", "指标仓库"];
 const timeframeLabels: Record<string, string> = {
   "1m": "1分钟",
   "5m": "5分钟",
@@ -151,6 +159,7 @@ export default function App() {
   const [sortBy, setSortBy] = useState("ret_15m");
   const [result, setResult] = useState<ScreenerResponse | null>(null);
   const [activePage, setActivePage] = useState("选币查询");
+  const [preferredLiveStrategyId, setPreferredLiveStrategyId] = useState<string | null>(null);
   const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
   const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
@@ -519,7 +528,7 @@ export default function App() {
               onClick={() => setActivePage(item)}
             >
               <span>{item}</span>
-              <b>{item === "指标仓库" ? "CORE" : item === "回测验证" ? "BETA" : index === 0 ? "LIVE" : "MVP"}</b>
+              <b>{navBadge(item, index)}</b>
             </button>
           ))}
         </nav>
@@ -534,7 +543,18 @@ export default function App() {
         {activePage === "指标仓库" ? (
           <IndicatorWarehousePage summary={summary} />
         ) : activePage === "回测验证" ? (
-          <BacktestPage summary={summary} />
+          <BacktestPage
+            summary={summary}
+            onLiveStrategyCreated={(strategy) => {
+              setPreferredLiveStrategyId(strategy.id);
+              setActivePage("实盘跟踪");
+            }}
+          />
+        ) : activePage === "实盘跟踪" ? (
+          <LiveTrackingPage
+            preferredStrategyId={preferredLiveStrategyId}
+            onPreferredStrategyConsumed={() => setPreferredLiveStrategyId(null)}
+          />
         ) : activePage === "合约列表" ? (
           <ContractListPage summary={summary} onSummaryRefresh={() => loadSummary(true)} />
         ) : activePage === "指标生产" ? (
@@ -1357,7 +1377,13 @@ function AnomalyEvidenceModal({
   );
 }
 
-function BacktestPage({ summary }: { summary: DataSummary | null }) {
+function BacktestPage({
+  summary,
+  onLiveStrategyCreated,
+}: {
+  summary: DataSummary | null;
+  onLiveStrategyCreated?: (strategy: LiveStrategy) => void;
+}) {
   const initialRange = suggestedBacktestRange(summary, "1H", "each_bar_close");
   const [favorites, setFavorites] = useState<ScreenerFavorite[]>([]);
   const [signalSets, setSignalSets] = useState<SignalSet[]>([]);
@@ -1394,6 +1420,8 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const [generatingSignalSet, setGeneratingSignalSet] = useState(false);
   const [running, setRunning] = useState(false);
   const [loadingRun, setLoadingRun] = useState(false);
+  const [promotingRun, setPromotingRun] = useState(false);
+  const [promotionNotice, setPromotionNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [klineTarget, setKlineTarget] = useState<{ instId: string; anchorTs?: number | null } | null>(null);
   const [klinePeriod, setKlinePeriod] = useState("1m");
@@ -1589,6 +1617,32 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
     }
   }
 
+  async function promoteActiveRunToLive() {
+    if (!activeRun) {
+      setError("请先选择一个回测结果。");
+      return;
+    }
+    if (activeRun.status !== "completed" || !activeRun.result) {
+      setError("只有已完成且有结果的回测可以添加到实盘。");
+      return;
+    }
+    setPromotingRun(true);
+    setPromotionNotice(null);
+    setError(null);
+    try {
+      const live = await createLiveStrategyFromBacktest({
+        backtest_id: activeRun.id,
+        mode: "paper",
+      });
+      setPromotionNotice(`已添加到实盘：${live.name}（${liveModeLabel(live.mode)}，${liveStatusLabel(live.status)}）`);
+      onLiveStrategyCreated?.(live);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "添加到实盘失败");
+    } finally {
+      setPromotingRun(false);
+    }
+  }
+
   function updateForm(key: keyof typeof form, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
   }
@@ -1720,6 +1774,7 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
   const tradeKlinePeriod = activeRun?.config.entry_timeframe ?? form.entryTimeframe;
   const selectedSignalSummary = selectedSignalSet?.summary ?? null;
   const canStartBacktest = Boolean(form.signalSetId && selectedSignalSet?.status === "completed");
+  const canPromoteToLive = Boolean(activeRun?.status === "completed" && activeRun.result);
 
   useEffect(() => {
     if (!selectedSignalSet || selectedSignalSet.status !== "running") return;
@@ -2091,7 +2146,11 @@ function BacktestPage({ summary }: { summary: DataSummary | null }) {
             <span className="eyebrow">Step 4</span>
             <strong>回测结果</strong>
             <em>成交记录、执行诊断和账户每日权益曲线</em>
+            <button className="primary-action promote-live-action" disabled={!canPromoteToLive || promotingRun} onClick={() => void promoteActiveRunToLive()}>
+              {promotingRun ? "冻结策略包..." : "添加到实盘"}
+            </button>
           </div>
+          {promotionNotice && <div className="inline-success live-promotion-notice">{promotionNotice}</div>}
           <div className="backtest-summary-grid">
             <BacktestStat label="总收益" value={`${formatSignedNumber(summaryStats.total_pnl)}U`} tone={numberTone(summaryStats.total_pnl)} />
             <BacktestStat label="收益率" value={formatPercent(summaryStats.total_return_pct)} tone={numberTone(summaryStats.total_return_pct)} />
@@ -2266,6 +2325,700 @@ function BacktestEquityChart({ points }: { points: Array<{ time: string | null; 
         <span>最新权益 <b>{formatNumber(latest?.equity ?? 0)}U</b></span>
         <span>当前回撤 <b>{formatPercent(latest?.drawdown_pct ?? 0)}</b></span>
       </div>
+    </div>
+  );
+}
+
+function LiveTrackingPage({
+  preferredStrategyId,
+  onPreferredStrategyConsumed,
+}: {
+  preferredStrategyId?: string | null;
+  onPreferredStrategyConsumed?: () => void;
+}) {
+  const [strategies, setStrategies] = useState<LiveStrategy[]>([]);
+  const [activeStrategy, setActiveStrategy] = useState<LiveStrategy | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [selectedBacktestDate, setSelectedBacktestDate] = useState<string | null>(null);
+  const [selectedLiveDate, setSelectedLiveDate] = useState<string | null>(null);
+  const initialPreferredStrategyId = useRef(preferredStrategyId ?? null);
+
+  useEffect(() => {
+    const preferred = initialPreferredStrategyId.current;
+    void loadStrategies(preferred).finally(() => {
+      if (preferred) onPreferredStrategyConsumed?.();
+    });
+  }, []);
+
+  useEffect(() => {
+    if (activeStrategy && !editingName) {
+      setRenameDraft(activeStrategy.name);
+    }
+  }, [activeStrategy?.id, activeStrategy?.name, editingName]);
+
+  useEffect(() => {
+    if (!preferredStrategyId || preferredStrategyId === initialPreferredStrategyId.current) return;
+    void loadStrategies(preferredStrategyId).finally(() => {
+      onPreferredStrategyConsumed?.();
+    });
+  }, [preferredStrategyId]);
+
+  async function loadStrategies(targetStrategyId?: string | null) {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchLiveStrategies();
+      setStrategies(data.items);
+      const targetId = targetStrategyId || activeStrategy?.id || "";
+      const selected = targetId
+        ? data.items.find((item) => item.id === targetId) ?? null
+        : data.items[0] ?? null;
+      if (selected) {
+        setActiveStrategy(selected);
+        await openStrategy(selected.id, { silent: true });
+      } else if (targetId) {
+        await openStrategy(targetId, { silent: true });
+      } else {
+        setActiveStrategy(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "实盘策略加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openStrategy(strategyId: string, options: { silent?: boolean } = {}) {
+    if (!options.silent) setLoadingDetail(true);
+    setError(null);
+    try {
+      const item = await fetchLiveStrategy(strategyId);
+      setActiveStrategy(item);
+      setSelectedBacktestDate(defaultBacktestLifecycleDate(item));
+      setSelectedLiveDate(defaultLiveLifecycleDate(item));
+      upsertLiveStrategy(item);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "实盘策略详情加载失败");
+    } finally {
+      if (!options.silent) setLoadingDetail(false);
+    }
+  }
+
+  function upsertLiveStrategy(item: LiveStrategy) {
+    setStrategies((current) => {
+      if (current.some((strategy) => strategy.id === item.id)) {
+        return current.map((strategy) => (strategy.id === item.id ? item : strategy));
+      }
+      return [item, ...current];
+    });
+  }
+
+  function startRename() {
+    if (!activeStrategy) return;
+    setRenameDraft(activeStrategy.name);
+    setEditingName(true);
+    setError(null);
+  }
+
+  async function submitRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!activeStrategy) return;
+    const nextName = renameDraft.trim();
+    if (!nextName) {
+      setError("实盘策略名称不能为空。");
+      return;
+    }
+    if (nextName === activeStrategy.name) {
+      setEditingName(false);
+      return;
+    }
+    setRenaming(true);
+    setError(null);
+    try {
+      const item = await renameLiveStrategy(activeStrategy.id, nextName);
+      setActiveStrategy(item);
+      upsertLiveStrategy(item);
+      setEditingName(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "实盘策略改名失败");
+    } finally {
+      setRenaming(false);
+    }
+  }
+
+  async function refreshBacktestTracking() {
+    if (!activeStrategy) return;
+    setUpdating(true);
+    setError(null);
+    try {
+      const item = await refreshLiveStrategyBacktest(activeStrategy.id);
+      setActiveStrategy(item);
+      setSelectedBacktestDate(defaultBacktestLifecycleDate(item));
+      setSelectedLiveDate((current) => current ?? defaultLiveLifecycleDate(item));
+      upsertLiveStrategy(item);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新回测失败");
+    } finally {
+      setUpdating(false);
+    }
+  }
+
+  async function startLiveTracking() {
+    if (!activeStrategy) return;
+    setUpdating(true);
+    setError(null);
+    try {
+      if (activeStrategy.status !== "running") {
+        await updateLiveStrategyStatus(activeStrategy.id, "running");
+      }
+      const item = await runLiveStrategyShadow(activeStrategy.id);
+      setActiveStrategy(item);
+      setSelectedBacktestDate((current) => current ?? defaultBacktestLifecycleDate(item));
+      setSelectedLiveDate(defaultLiveLifecycleDate(item));
+      upsertLiveStrategy(item);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "启动实盘失败");
+    } finally {
+      setUpdating(false);
+    }
+  }
+
+  function selectLiveDate(date: string) {
+    setSelectedLiveDate(date);
+    setSelectedBacktestDate(date);
+  }
+
+  const packageInfo = activeStrategy?.strategy_package;
+  const lifecycle = activeStrategy?.lifecycle;
+  const lifecycleCurve = lifecycle?.curve ?? [];
+  const backtestCurve = lifecycleCurve.filter((point) => point.phase === "backtest" || point.phase === "marker");
+  const liveCurve = liveLifecycleCurve(lifecycle);
+  const selectedBacktestLifecycleDate = selectedBacktestDate ?? backtestCurve.at(-1)?.date ?? lifecycle?.marker?.date ?? null;
+  const selectedLiveLifecycleDate = selectedLiveDate ?? liveCurve.at(-1)?.date ?? lifecycle?.marker?.date ?? null;
+  const selectedBacktestPoint = backtestCurve.find((point) => point.date === selectedBacktestLifecycleDate)
+    ?? (selectedBacktestLifecycleDate ? { date: selectedBacktestLifecycleDate, phase: "backtest" } as LiveStrategy["lifecycle"]["curve"][number] : null)
+    ?? backtestCurve.at(-1)
+    ?? null;
+  const selectedLivePoint = liveCurve.find((point) => point.date === selectedLiveLifecycleDate) ?? liveCurve.at(-1) ?? null;
+  const selectedBacktestDetail = lifecycle?.daily_details?.find((detail) => detail.date === selectedBacktestLifecycleDate) ?? null;
+  const selectedLiveDetail = lifecycle?.daily_details?.find((detail) => detail.date === selectedLiveLifecycleDate) ?? null;
+  return (
+    <section className="metadata-page live-page">
+      {error && <div className="inline-error live-error">{error}</div>}
+
+      {loading ? (
+        <div className="live-dashboard-empty">
+          <EmptyState title="正在加载实盘策略" text="读取从回测结果添加到实盘的策略实例。" />
+        </div>
+      ) : !activeStrategy || !packageInfo ? (
+        <div className="live-dashboard-empty">
+          <EmptyState title="暂无实盘策略" text="在回测结果 Step 4 点击「添加到实盘」后，这里会复制一份历史表现并继续跟踪。" />
+        </div>
+      ) : (
+        <div className="live-dashboard-shell">
+          <div className="live-strategy-tabbar" aria-label="实盘策略实例">
+            <div className="live-strategy-tabs">
+              {strategies.map((strategy, index) => (
+                <button
+                  className={strategy.id === activeStrategy.id ? "active" : ""}
+                  disabled={loadingDetail}
+                  key={strategy.id}
+                  onClick={() => void openStrategy(strategy.id)}
+                  title={strategy.name}
+                >
+                  <span>{strategy.name}</span>
+                  <em>{liveStatusLabel(strategy.status)} · #{index + 1}</em>
+                </button>
+              ))}
+            </div>
+            <div className="live-tabbar-tools">
+              {editingName ? (
+                <form className="live-tab-rename-form" onSubmit={(event) => void submitRename(event)}>
+                  <input
+                    autoFocus
+                    disabled={renaming}
+                    maxLength={80}
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        setRenameDraft(activeStrategy.name);
+                        setEditingName(false);
+                      }
+                    }}
+                    value={renameDraft}
+                  />
+                  <button className="primary-action" disabled={renaming || !renameDraft.trim()} type="submit">
+                    保存
+                  </button>
+                  <button
+                    className="secondary-action"
+                    disabled={renaming}
+                    type="button"
+                    onClick={() => {
+                      setRenameDraft(activeStrategy.name);
+                      setEditingName(false);
+                    }}
+                  >
+                    取消
+                  </button>
+                </form>
+              ) : (
+                <>
+                  <span>{strategies.length} 个实盘实例</span>
+                  <button className="secondary-action" disabled={updating || loadingDetail} onClick={startRename}>
+                    改名
+                  </button>
+                  <button className="secondary-action" disabled={loading || loadingDetail} onClick={() => void loadStrategies()}>
+                    刷新
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="live-compare-grid">
+            <section className="live-compare-panel">
+              <LiveLifecycleChart
+                actionLabel="更新回测"
+                actionDisabled={loadingDetail}
+                emptyText="来源回测曲线为空。"
+                metricKey="backtest_return_pct"
+                onAction={() => void refreshBacktestTracking()}
+                onSelectDate={setSelectedBacktestDate}
+                phaseLabel="回测"
+                points={backtestCurve}
+                selectedDate={selectedBacktestLifecycleDate}
+                title="回测历史"
+                tradeSource="backtest"
+              />
+              <LiveDailyTradeDetailTable
+                detail={selectedBacktestDetail}
+                point={selectedBacktestPoint}
+                source="backtest"
+                title="回测每日成交明细"
+              />
+            </section>
+            <section className="live-compare-panel">
+              <LiveLifecycleChart
+                actionLabel="启动实盘"
+                actionDisabled={updating}
+                emptyText="启动实盘后，这里展示实盘曲线。"
+                metricKey="live_return_pct"
+                onAction={() => void startLiveTracking()}
+                onSelectDate={selectLiveDate}
+                phaseLabel="实盘"
+                points={liveCurve}
+                selectedDate={selectedLiveLifecycleDate}
+                title="实盘结果"
+                tradeSource="live"
+              />
+              <LiveDailyTradeDetailTable
+                detail={selectedLiveDetail}
+                point={selectedLivePoint}
+                source="live"
+                title="实盘每日成交明细"
+              />
+            </section>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LiveConfigGroup({ title, items }: { title: string; items: Array<[string, string]> }) {
+  return (
+    <div className="live-config-group">
+      <strong>{title}</strong>
+      {items.map(([label, value]) => (
+        <span key={`${title}-${label}`}>
+          <em>{label}</em>
+          <b title={value}>{value}</b>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function LiveLifecycleChart({
+  actionLabel,
+  actionDisabled = false,
+  emptyText,
+  metricKey,
+  onAction,
+  onSelectDate,
+  phaseLabel,
+  points,
+  selectedDate,
+  title,
+  tradeSource,
+}: {
+  actionLabel: string;
+  actionDisabled?: boolean;
+  emptyText: string;
+  metricKey: "backtest_return_pct" | "live_return_pct";
+  onAction: () => void;
+  onSelectDate: (date: string) => void;
+  phaseLabel: string;
+  points: LiveStrategy["lifecycle"]["curve"];
+  selectedDate: string | null;
+  title: string;
+  tradeSource: "backtest" | "live";
+}) {
+  if (points.length === 0) {
+    return (
+      <div className="live-chart-card">
+        <div className="live-chart-header">
+          <div>
+            <span>{title}</span>
+            <strong>--</strong>
+            <em>{phaseLabel}</em>
+          </div>
+          <button className="primary-action live-chart-action" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+        </div>
+        <EmptyState title="暂无曲线" text={emptyText} />
+      </div>
+    );
+  }
+  const width = 1040;
+  const height = 420;
+  const padding = { top: 34, right: 34, bottom: 52, left: 72 };
+  const valueFor = (point: LiveStrategy["lifecycle"]["curve"][number]) => {
+    const value = point[metricKey];
+    return typeof value === "number" ? value : null;
+  };
+  const values = points.map(valueFor).filter((value): value is number => value !== null);
+  const minValue = Math.min(...values, 0);
+  const maxValue = Math.max(...values, 0);
+  const span = maxValue - minValue || 1;
+  const xFor = (index: number) => padding.left + (index / Math.max(1, points.length - 1)) * (width - padding.left - padding.right);
+  const yFor = (value: number) => padding.top + ((maxValue - value) / span) * (height - padding.top - padding.bottom);
+  const zeroY = yFor(Math.min(Math.max(0, minValue), maxValue));
+  const series =
+    points.flatMap((point, index) => {
+      const value = valueFor(point);
+      return value === null ? [] : [{ index, point, value, x: xFor(index), y: yFor(value) }];
+    });
+  const smoothPathFor = (items: typeof series) => {
+    if (items.length === 0) return "";
+    if (items.length === 1) return `M ${items[0].x} ${items[0].y}`;
+    return items.slice(1).reduce((path, item, index) => {
+      const previous = items[index];
+      const controlX = (previous.x + item.x) / 2;
+      return `${path} C ${controlX} ${previous.y}, ${controlX} ${item.y}, ${item.x} ${item.y}`;
+    }, `M ${items[0].x} ${items[0].y}`);
+  };
+  const areaPathFor = (items: typeof series) => {
+    if (items.length === 0) return "";
+    const first = items[0];
+    const last = items[items.length - 1];
+    return `${smoothPathFor(items)} L ${last.x} ${zeroY} L ${first.x} ${zeroY} Z`;
+  };
+  const selectedIndex = selectedDate ? points.findIndex((point) => point.date === selectedDate) : -1;
+  const selectedPoint = selectedIndex >= 0 ? points[selectedIndex] : points.at(-1);
+  const selectedX = selectedIndex >= 0 ? xFor(selectedIndex) : xFor(points.length - 1);
+  const selectedValue = selectedPoint ? valueFor(selectedPoint) : null;
+  const selectedDailyPnl = Number(tradeSource === "live" ? selectedPoint?.live_daily_pnl ?? 0 : selectedPoint?.daily_pnl ?? 0);
+  const selectedTradeCount = Number(selectedPoint?.trade_count ?? 0);
+  const selectedPointDate = selectedPoint?.date ?? null;
+  const xStep = (width - padding.left - padding.right) / Math.max(1, points.length - 1);
+  const densePoints = points.length > 70 || xStep < 12;
+  const hitRadius = Math.max(4, Math.min(10, xStep * 0.45));
+  const xTicks = [
+    points[0],
+    points.at(-1),
+  ].filter((point, index, list): point is LiveStrategy["lifecycle"]["curve"][number] => Boolean(point) && list.findIndex((item) => item?.date === point?.date) === index);
+  const lineClass = tradeSource === "live" ? "live-line" : "history-line";
+  const areaClass = tradeSource === "live" ? "live-area" : "history-area";
+  function selectByOffset(offset: number) {
+    const currentIndex = selectedIndex >= 0 ? selectedIndex : points.length - 1;
+    const nextIndex = Math.min(points.length - 1, Math.max(0, currentIndex + offset));
+    const nextPoint = points[nextIndex];
+    if (nextPoint) onSelectDate(nextPoint.date);
+  }
+
+  function handleChartKeyDown(event: KeyboardEvent<SVGSVGElement>) {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      selectByOffset(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      selectByOffset(1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      const firstPoint = points[0];
+      if (firstPoint) onSelectDate(firstPoint.date);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      const lastPoint = points.at(-1);
+      if (lastPoint) onSelectDate(lastPoint.date);
+    }
+  }
+
+  return (
+    <div className="live-chart-card">
+      <div className="live-chart-header">
+        <div>
+          <span>{title}</span>
+          <strong className={numberTone(Number(selectedValue ?? 0))}>{selectedValue === null ? "--" : formatPercent(selectedValue)}</strong>
+          <em>{selectedPoint?.date ?? points.at(-1)?.date} · {phaseLabel}</em>
+        </div>
+        <div className="live-chart-selected-stats">
+          <span>
+            <em>当日PnL</em>
+            <b className={numberTone(selectedDailyPnl)}>{formatSignedNumber(selectedDailyPnl)}U</b>
+          </span>
+          <span>
+            <em>成交</em>
+            <b>{selectedTradeCount}</b>
+          </span>
+          <button className="primary-action live-chart-action" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+        </div>
+      </div>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className={`live-life-chart ${tradeSource === "live" ? "live-source-live" : "live-source-history"}`}
+        onKeyDown={handleChartKeyDown}
+        role="img"
+        tabIndex={0}
+        aria-label={`${title}，左右方向键切换日期`}
+      >
+        <defs>
+          <linearGradient id="liveChartBg" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#f7fbff" />
+            <stop offset="58%" stopColor="#ffffff" />
+            <stop offset="100%" stopColor="#f6f8fb" />
+          </linearGradient>
+          <linearGradient id="historyAreaGradient" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#e65f57" stopOpacity="0.24" />
+            <stop offset="100%" stopColor="#e65f57" stopOpacity="0.02" />
+          </linearGradient>
+          <linearGradient id="liveAreaGradient" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#1f9d68" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="#1f9d68" stopOpacity="0.03" />
+          </linearGradient>
+          <filter id="liveLineGlow" x="-20%" y="-40%" width="140%" height="180%">
+            <feDropShadow dx="0" dy="4" stdDeviation="5" floodColor="#1f9d68" floodOpacity="0.18" />
+          </filter>
+          <filter id="historyLineGlow" x="-20%" y="-40%" width="140%" height="180%">
+            <feDropShadow dx="0" dy="4" stdDeviation="5" floodColor="#e65f57" floodOpacity="0.14" />
+          </filter>
+        </defs>
+        <rect className="chart-bg" x="0" y="0" width={width} height={height} rx="18" />
+        {[minValue, minValue + span * 0.25, minValue + span * 0.5, minValue + span * 0.75, maxValue].map((value, index) => {
+          const y = yFor(value);
+          return (
+            <g key={`${index}-${value}`}>
+              <line className="grid" x1={padding.left} x2={width - padding.right} y1={y} y2={y} />
+              <text className="axis" x={padding.left - 12} y={y + 4}>{formatPercent(value)}</text>
+            </g>
+          );
+        })}
+        <line className="zero" x1={padding.left} x2={width - padding.right} y1={yFor(0)} y2={yFor(0)} />
+        {xTicks.map((point) => {
+          const index = points.findIndex((item) => item.date === point.date);
+          return (
+            <text className="x-axis" key={point.date} x={xFor(index)} y={height - 18}>
+              {point.date.slice(5)}
+            </text>
+          );
+        })}
+        <path className={areaClass} d={areaPathFor(series)} />
+        <path className={lineClass} d={smoothPathFor(series)} />
+        {points.map((point, index) => {
+          const value = valueFor(point);
+          if (value === null) return null;
+          const hasTrade = Number(point.trade_count ?? 0) > 0;
+          const isSelected = point.date === selectedPointDate;
+          const radius = isSelected ? 5.5 : hasTrade ? (densePoints ? 2.7 : 3.3) : (densePoints ? 1.35 : 2);
+          return (
+            <g
+              key={point.date}
+              onClick={(event) => {
+                onSelectDate(point.date);
+                event.currentTarget.ownerSVGElement?.focus();
+              }}
+            >
+              <title>{`${point.date} ${formatPercent(value)} 交易${point.trade_count ?? 0}笔`}</title>
+              <circle className="hit-point" cx={xFor(index)} cy={yFor(value)} r={hitRadius} />
+              <circle
+                className={isSelected ? "selected-point" : hasTrade ? "trade-point" : "data-point"}
+                cx={xFor(index)}
+                cy={yFor(value)}
+                r={radius}
+              />
+            </g>
+          );
+        })}
+        {selectedPoint && (
+          <g className="selected-group">
+            <line className="selected-line" x1={selectedX} x2={selectedX} y1={padding.top} y2={height - padding.bottom} />
+            {selectedValue !== null && (
+              <>
+                <circle className="selected-halo" cx={selectedX} cy={yFor(selectedValue)} r="13" />
+                <circle className="selected-core" cx={selectedX} cy={yFor(selectedValue)} r="5" />
+              </>
+            )}
+            <rect x={Math.min(Math.max(selectedX + 12, padding.left + 6), width - 196)} y={height - 46} width="184" height="30" rx="15" />
+            <text className="selected-date" x={Math.min(Math.max(selectedX + 104, padding.left + 98), width - 104)} y={height - 26}>{selectedPoint.date}</text>
+          </g>
+        )}
+      </svg>
+      <div className="live-chart-legend">
+        <span><b className={tradeSource === "live" ? "live-dot" : "history-dot"} />{phaseLabel}</span>
+        <span><b className="trade-dot" />有交易日</span>
+      </div>
+    </div>
+  );
+}
+
+function LiveDailyTradeDetailTable({
+  detail,
+  point,
+  source,
+  title,
+}: {
+  detail: LiveStrategy["lifecycle"]["daily_details"][number] | null;
+  point: LiveStrategy["lifecycle"]["curve"][number] | null;
+  source: "backtest" | "live";
+  title: string;
+}) {
+  const rows = (
+    source === "live"
+      ? (detail?.live_trades ?? []).map((record) => record.payload)
+      : detail?.backtest_trades ?? []
+  ).slice(0, 8);
+  return (
+    <div className="live-daily-trade-panel">
+      <div className="live-panel-title">{title}</div>
+      <div className="live-scroll-table">
+        <table>
+          <thead>
+            <tr>
+              <th>合约</th>
+              <th>方向</th>
+              <th>进场时间</th>
+              <th>出场时间</th>
+              <th>进场价</th>
+              <th>出场价</th>
+              <th>当日收益率</th>
+              <th>当日收益</th>
+              <th>贡献度</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={9}>当天没有{source === "live" ? "实盘" : "回测"}成交记录</td>
+              </tr>
+            ) : rows.map((trade, index) => {
+              const pnl = Number(trade.pnl_usdt ?? 0);
+              const total = Math.abs(Number(source === "live" ? point?.live_daily_pnl ?? pnl : point?.daily_pnl ?? pnl)) || Math.abs(pnl) || 1;
+              const side = String(trade.side ?? "");
+              return (
+                <tr key={`${String(trade.inst_id ?? "")}-${index}`}>
+                  <td>{String(trade.inst_id ?? "--")}</td>
+                  <td className={side === "long" ? "up" : side === "short" ? "down" : ""}>{side === "long" ? "买" : side === "short" ? "卖" : "--"}</td>
+                  <td>{String(trade.entry_time ?? "--")}</td>
+                  <td>{String(trade.exit_time ?? "--")}</td>
+                  <td>{formatOptionalNumber(Number(trade.entry_price ?? trade.raw_entry_price ?? 0))}</td>
+                  <td>{formatOptionalNumber(Number(trade.exit_price ?? trade.raw_exit_price ?? 0))}</td>
+                  <td className={numberTone(Number(trade.net_return_pct ?? 0))}>{formatPercent(Number(trade.net_return_pct ?? 0))}</td>
+                  <td className={numberTone(pnl)}>{formatSignedNumber(pnl)}</td>
+                  <td className={numberTone(pnl)}>{formatPercent((pnl / total) * 100)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function LiveDailyInspector({
+  point,
+  detail,
+  markerDate,
+}: {
+  point: LiveStrategy["lifecycle"]["curve"][number] | null;
+  detail: LiveStrategy["lifecycle"]["daily_details"][number] | null;
+  markerDate?: string | null;
+}) {
+  return (
+    <div className="backtest-card live-day-inspector">
+      <div className="backtest-card-head">
+        <span className="eyebrow">Selected Day</span>
+        <strong>{point?.date ?? "--"}</strong>
+        <em>{point?.date === markerDate ? "实盘开启" : point?.phase === "live" ? "实盘段" : "历史段"}</em>
+      </div>
+      <div className="live-day-metrics">
+        <span>历史收益 <b className={numberTone(Number(point?.backtest_return_pct ?? 0))}>{point?.backtest_return_pct === undefined || point?.backtest_return_pct === null ? "--" : formatPercent(point.backtest_return_pct)}</b></span>
+        <span>影子收益 <b className={numberTone(Number(point?.shadow_return_pct ?? 0))}>{point?.shadow_return_pct === undefined || point?.shadow_return_pct === null ? "--" : formatPercent(point.shadow_return_pct)}</b></span>
+        <span>实盘收益 <b className={numberTone(Number(point?.live_return_pct ?? 0))}>{point?.live_return_pct === undefined || point?.live_return_pct === null ? "--" : formatPercent(point.live_return_pct)}</b></span>
+        <span>当日PnL <b className={numberTone(Number(point?.live_daily_pnl ?? point?.daily_pnl ?? 0))}>{formatSignedNumber(Number(point?.live_daily_pnl ?? point?.daily_pnl ?? 0))}U</b></span>
+        <span>信号 <b>{detail?.signal_count ?? point?.signal_count ?? 0}</b></span>
+        <span>交易 <b>{(detail?.live_trades?.length || detail?.shadow_trades?.length || detail?.backtest_trades?.length || point?.trade_count || 0)}</b></span>
+      </div>
+      <div className="live-day-note">
+        {point?.date === markerDate
+          ? "这一天是历史回测复制到实盘生命周期的分界点，后续曲线按实盘开启权益重新计量。"
+          : point?.phase === "live"
+            ? "实盘开启后的自然日表现，影子回测和实盘/纸面交易会在这里并行展示。"
+            : "来源回测的历史自然日表现，复制到实盘页用于展示策略上线前表现。"}
+      </div>
+    </div>
+  );
+}
+
+function LiveDailyTradeTable({ detail }: { detail: LiveStrategy["lifecycle"]["daily_details"][number] | null }) {
+  const rows = [
+    ...(detail?.backtest_trades ?? []).map((trade) => ({ source: "历史回测", trade })),
+    ...(detail?.shadow_trades ?? []).map((record) => ({ source: "影子回测", trade: record.payload })),
+    ...(detail?.live_trades ?? []).map((record) => ({ source: record.source === "paper_live" ? "纸面实盘" : "实盘记录", trade: record.payload })),
+  ];
+  if (rows.length === 0) {
+    return <EmptyState title="当天没有交易" text="点击曲线上的其他自然日，可以查看该日信号、交易和对账记录。" />;
+  }
+  return (
+    <div className="backtest-table-wrap live-day-table-wrap">
+      <table className="backtest-table">
+        <thead>
+          <tr>
+            <th>来源</th>
+            <th>合约</th>
+            <th>方向</th>
+            <th>确认时间</th>
+            <th>入场</th>
+            <th>出场</th>
+            <th>出场原因</th>
+            <th>收益率</th>
+            <th>PnL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 120).map(({ source, trade }, index) => (
+            <tr key={`${source}-${index}-${String(trade.inst_id ?? "")}`}>
+              <td>{source}</td>
+              <td>{String(trade.inst_id ?? "--")}</td>
+              <td>{String(trade.direction ?? (trade.side === "short" ? "做空" : trade.side === "long" ? "做多" : "--"))}</td>
+              <td>{String(trade.confirm_time ?? trade.signal_time ?? "--")}</td>
+              <td>{String(trade.entry_time ?? "--")}</td>
+              <td>{String(trade.exit_time ?? "--")}</td>
+              <td>{String(trade.exit_reason ?? "--")}</td>
+              <td className={numberTone(Number(trade.net_return_pct ?? 0))}>{formatPercent(Number(trade.net_return_pct ?? 0))}</td>
+              <td className={numberTone(Number(trade.pnl_usdt ?? 0))}>{formatSignedNumber(Number(trade.pnl_usdt ?? 0))}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -4959,6 +5712,112 @@ function runStatusLabel(status: string) {
   if (status === "failed") return "失败";
   if (status === "running") return "运行中";
   return status;
+}
+
+function liveStatusLabel(status: string | undefined) {
+  if (status === "running") return "运行中";
+  if (status === "paused") return "已暂停";
+  if (status === "stopped") return "已停止";
+  if (status === "tripped") return "已熔断";
+  return status || "--";
+}
+
+function liveStatusTone(status: string | undefined) {
+  if (status === "running") return "up";
+  if (status === "tripped" || status === "stopped") return "down";
+  return "";
+}
+
+function liveModeLabel(mode: string | undefined) {
+  if (mode === "observe") return "观察";
+  if (mode === "paper") return "纸面";
+  if (mode === "manual") return "半自动";
+  return mode || "--";
+}
+
+function liveModeDescription(mode: string) {
+  if (mode === "observe") return "只扫描信号，不建立仓位";
+  if (mode === "paper") return "模拟开平仓和PnL";
+  if (mode === "manual") return "生成订单建议，人工确认";
+  return "";
+}
+
+function liveVerificationLabel(status: string | undefined) {
+  if (status === "verified") return "已验证";
+  if (status === "shadow_verifying") return "影子验证";
+  if (status === "waiting_for_live_data") return "等实盘记录";
+  if (status === "needs_review") return "待复核";
+  return status || "--";
+}
+
+function liveVerificationTone(status: string | undefined) {
+  if (status === "verified") return "up";
+  if (status === "needs_review") return "down";
+  return "";
+}
+
+function signalModeLabel(mode: string | undefined) {
+  if (mode === "each_bar_close") return "逐根K线";
+  if (mode === "daily") return "每日收盘";
+  return mode || "--";
+}
+
+function entryRuleLabel(rule: string | undefined) {
+  if (rule === "consecutive_green_bars") return "连续阳线后下一根开盘";
+  if (rule === "next_bar_open") return "确认后下一根开盘";
+  return rule || "--";
+}
+
+function stopModelLabel(model: string | undefined) {
+  if (model === "bot_like_checkpoint") return "检查点止损";
+  if (model === "hard_stop_intrabar") return "盘中硬止损";
+  return model || "--";
+}
+
+function shortHash(value: string | undefined) {
+  if (!value) return "--";
+  return value.length > 8 ? value.slice(0, 8) : value;
+}
+
+function defaultLifecycleDate(strategy: LiveStrategy | null | undefined) {
+  return strategy?.lifecycle?.summary?.latest_date
+    ?? strategy?.lifecycle?.curve?.at(-1)?.date
+    ?? strategy?.lifecycle?.marker?.date
+    ?? null;
+}
+
+function defaultBacktestLifecycleDate(strategy: LiveStrategy | null | undefined) {
+  return strategy?.lifecycle?.curve?.filter((point) => point.phase === "backtest" || point.phase === "marker").at(-1)?.date
+    ?? strategy?.lifecycle?.marker?.date
+    ?? defaultLifecycleDate(strategy);
+}
+
+function defaultLiveLifecycleDate(strategy: LiveStrategy | null | undefined) {
+  return liveLifecycleCurve(strategy?.lifecycle).at(-1)?.date
+    ?? strategy?.lifecycle?.marker?.date
+    ?? defaultLifecycleDate(strategy);
+}
+
+function liveLifecycleCurve(lifecycle: LiveStrategy["lifecycle"] | null | undefined) {
+  const rawMarker = lifecycle?.curve?.find((point) => point.phase === "marker" || point.date === lifecycle.marker?.date);
+  const marker = rawMarker
+    ? {
+        ...rawMarker,
+        phase: "marker",
+        live_return_pct: typeof rawMarker.live_return_pct === "number" ? rawMarker.live_return_pct : 0,
+        live_daily_pnl: typeof rawMarker.live_daily_pnl === "number" ? rawMarker.live_daily_pnl : 0,
+        trade_count: 0,
+      }
+    : null;
+  const livePoints = lifecycle?.curve?.filter((point) => point.phase === "live" && typeof point.live_return_pct === "number") ?? [];
+  return marker ? [marker, ...livePoints.filter((point) => point.date !== marker.date)] : livePoints;
+}
+
+function navBadge(item: string, index: number) {
+  if (item === "指标仓库") return "CORE";
+  if (item === "回测验证") return "BETA";
+  if (item === "实盘跟踪") return "LIVE";
+  return index === 0 ? "SCAN" : "MVP";
 }
 
 function localDateString() {

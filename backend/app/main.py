@@ -12,6 +12,7 @@ from .data_quality_service import data_quality_service
 from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
 from .indicator_repository import IndicatorCreate, indicator_repository
+from .live_service import live_strategy_service
 from .screener import builtin_indicators, query_screener, query_screener_time_counts
 from .signal_pool_service import signal_pool_service
 from . import contract_update_service, script_indicator_service
@@ -102,6 +103,25 @@ class SignalSetBacktestRequest(BaseModel):
     max_positions: int = Field(default=2, ge=1, le=100)
     fee_bps_per_side: float = Field(default=5, ge=0)
     slippage_bps_per_side: float = Field(default=5, ge=0)
+
+
+class LiveStrategyCreateRequest(BaseModel):
+    backtest_id: str = Field(min_length=1)
+    name: str = ""
+    mode: str = "observe"
+
+
+class LiveStrategyStatusRequest(BaseModel):
+    status: str = Field(min_length=1)
+
+
+class LiveStrategyModeRequest(BaseModel):
+    mode: str = Field(min_length=1)
+
+
+class LiveStrategyRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -475,6 +495,79 @@ def backtest_run(run_id: str) -> dict:
 def create_backtest_run(payload: BacktestRunRequest) -> dict:
     try:
         return backtest_service.create_run(payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/live-strategies")
+def live_strategies() -> dict:
+    return {"items": live_strategy_service.list_strategies()}
+
+
+@app.post("/api/live-strategies/from-backtest", status_code=201)
+def create_live_strategy_from_backtest(payload: LiveStrategyCreateRequest) -> dict:
+    try:
+        return live_strategy_service.create_from_backtest(payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/live-strategies/{strategy_id}")
+def live_strategy(strategy_id: str) -> dict:
+    item = live_strategy_service.get_strategy(strategy_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"实盘策略不存在：{strategy_id}")
+    return item
+
+
+@app.post("/api/live-strategies/{strategy_id}/status")
+def update_live_strategy_status(strategy_id: str, payload: LiveStrategyStatusRequest) -> dict:
+    try:
+        return live_strategy_service.update_status(strategy_id, payload.status)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/mode")
+def update_live_strategy_mode(strategy_id: str, payload: LiveStrategyModeRequest) -> dict:
+    try:
+        return live_strategy_service.update_mode(strategy_id, payload.mode)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/rename")
+def rename_live_strategy(strategy_id: str, payload: LiveStrategyRenameRequest) -> dict:
+    try:
+        return live_strategy_service.rename_strategy(strategy_id, payload.name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/recheck")
+def recheck_live_strategy(strategy_id: str) -> dict:
+    try:
+        return live_strategy_service.rerun_consistency_check(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/refresh-backtest")
+def refresh_live_strategy_backtest(strategy_id: str) -> dict:
+    try:
+        return live_strategy_service.refresh_backtest_history(strategy_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

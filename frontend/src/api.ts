@@ -664,6 +664,252 @@ export type BacktestRun = {
   finished_at: number | null;
 };
 
+export type LiveStrategyMode = "observe" | "paper" | "manual" | string;
+export type LiveStrategyStatus = "running" | "paused" | "stopped" | "tripped" | string;
+export type LiveVerificationStatus = "shadow_verifying" | "waiting_for_live_data" | "verified" | "needs_review" | string;
+
+export type LiveStrategyPackage = {
+  engine_version: string;
+  package_hash: string;
+  source_backtest_id: string;
+  source_backtest_name: string;
+  source_backtest_created_at?: number | null;
+  signal: {
+    signal_set_id: string;
+    favorite_id?: string;
+    favorite_snapshot?: Record<string, unknown>;
+    signal_timeframe?: string;
+    signal_mode?: string;
+    start_date?: string;
+    end_date?: string;
+  };
+  entry: {
+    side?: string;
+    entry_timeframe?: string;
+    entry_rule?: string;
+    entry_window_minutes?: number;
+    entry_consecutive_bars?: number;
+    entry_min_gain_pct_each?: number;
+  };
+  exit: {
+    exit_hold_minutes?: number;
+    stop_loss_pct?: number;
+    stop_model?: string;
+  };
+  risk: {
+    position_usdt?: number;
+    leverage?: number;
+    max_positions?: number;
+    fee_bps_per_side?: number;
+    slippage_bps_per_side?: number;
+    max_same_symbol_positions?: number;
+  };
+  backtest_summary?: Partial<BacktestSummary>;
+  created_from_result?: {
+    total_trades?: number;
+    total_pnl?: number;
+    total_return_pct?: number;
+    max_drawdown_pct?: number;
+    win_rate?: number;
+  };
+};
+
+export type LiveConsistencyCheck = {
+  status: "passed" | "failed" | "pending" | string;
+  checked_at: number;
+  engine_version: string;
+  message: string;
+  checks: Array<{
+    key: string;
+    label: string;
+    passed: boolean;
+    detail: string;
+  }>;
+};
+
+export type LiveVerificationState = {
+  status: LiveVerificationStatus;
+  required_matches: number;
+  matched_trades: number;
+  consecutive_matches: number;
+  total_checks: number;
+  passed_checks: number;
+  failed_checks: number;
+  pending_checks: number;
+  shadow_runs: number;
+  last_shadow_date?: string | null;
+  last_shadow_run_id?: string | null;
+  last_data_mode?: string | null;
+  last_run_at?: number | null;
+  last_message?: string;
+  package_hash?: string;
+};
+
+export type LiveShadowRun = {
+  id: string;
+  shadow_date: string;
+  data_mode: string;
+  status: string;
+  signal_summary: Record<string, unknown>;
+  summary: Partial<BacktestSummary>;
+  error: string;
+  created_at: number;
+  finished_at: number | null;
+};
+
+export type LiveTradeRecord = {
+  id: string;
+  shadow_run_id?: string | null;
+  source: string;
+  sequence_no: number;
+  trade_key: string;
+  inst_id: string;
+  side?: string;
+  status: string;
+  signal_ts?: number | null;
+  confirm_ts?: number | null;
+  entry_ts?: number | null;
+  exit_ts?: number | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  pnl_usdt?: number | null;
+  payload: Record<string, unknown>;
+  created_at: number;
+};
+
+export type LiveReconcileCheck = {
+  id: string;
+  shadow_trade_id: string;
+  live_trade_id?: string | null;
+  sequence_no: number;
+  status: "passed" | "failed" | "pending" | string;
+  mismatches: Array<Record<string, unknown>>;
+  tolerance: Record<string, unknown>;
+  created_at: number;
+};
+
+export type LiveLifecyclePoint = {
+  date: string;
+  phase: "backtest" | "marker" | "live" | string;
+  backtest_equity?: number;
+  backtest_return_pct?: number | null;
+  shadow_equity?: number;
+  live_equity?: number;
+  shadow_return_pct?: number | null;
+  live_return_pct?: number | null;
+  daily_pnl?: number;
+  daily_return_pct?: number;
+  shadow_daily_pnl?: number;
+  live_daily_pnl?: number;
+  drawdown_pct?: number;
+  trade_count?: number;
+  signal_count?: number;
+  reconcile_passed?: number;
+  reconcile_failed?: number;
+  marker_event?: string | null;
+};
+
+export type LiveLifecycleDailyDetail = {
+  date: string;
+  signal_count: number;
+  opened_count: number;
+  backtest_trades: BacktestTrade[];
+  shadow_trades: LiveTradeRecord[];
+  live_trades: LiveTradeRecord[];
+  reconcile_checks: LiveReconcileCheck[];
+  shadow_runs: LiveShadowRun[];
+};
+
+export type LiveLifecycle = {
+  marker: {
+    date: string;
+    label: string;
+    created_at: number;
+    created_time: string;
+    equity: number;
+  };
+  summary: {
+    history_days: number;
+    live_days: number;
+    latest_date?: string | null;
+    latest_backtest_return_pct?: number | null;
+    latest_shadow_return_pct?: number | null;
+    latest_live_return_pct?: number | null;
+  };
+  curve: LiveLifecyclePoint[];
+  daily_details: LiveLifecycleDailyDetail[];
+};
+
+export type LiveRuntimeState = {
+  refreshed_backtest?: {
+    updated_at?: number;
+    start_date?: string;
+    end_date?: string;
+    signal_summary?: Record<string, unknown>;
+    result?: BacktestResult;
+  };
+  current_positions?: Array<Record<string, unknown>>;
+  pending_candidates?: Array<Record<string, unknown>>;
+  recent_signals?: Array<Record<string, unknown>>;
+  closed_trades?: Array<Record<string, unknown>>;
+  skip_events?: Array<Record<string, unknown>>;
+  risk_events?: Array<Record<string, unknown>>;
+  shadow_trades?: Array<Record<string, unknown>>;
+  scan?: {
+    last_scan_at?: number | null;
+    next_scan_at?: number | null;
+    last_signal_time?: string | null;
+    source_event_count?: number;
+  };
+  counters?: {
+    today_signals?: number;
+    pending_candidates?: number;
+    open_positions?: number;
+    closed_trades?: number;
+    today_pnl?: number;
+    source_backtest_trades?: number;
+    shadow_runs?: number;
+    shadow_trades?: number;
+    reconcile_passed?: number;
+    reconcile_failed?: number;
+    reconcile_pending?: number;
+  };
+  last_status_change_at?: number;
+  last_status_change_reason?: string;
+  last_mode_change_at?: number;
+  last_mode?: string;
+};
+
+export type LiveStrategy = {
+  id: string;
+  name: string;
+  source_backtest_id: string;
+  source_signal_set_id: string;
+  mode: LiveStrategyMode;
+  status: LiveStrategyStatus;
+  strategy_package: LiveStrategyPackage;
+  verification_state: LiveVerificationState;
+  consistency_check: LiveConsistencyCheck;
+  runtime_state: LiveRuntimeState;
+  lifecycle: LiveLifecycle;
+  shadow_runs: LiveShadowRun[];
+  reconcile_checks: LiveReconcileCheck[];
+  live_trades: LiveTradeRecord[];
+  shadow_trades: LiveTradeRecord[];
+  error: string;
+  created_at: number;
+  updated_at: number;
+  started_at: number | null;
+  paused_at: number | null;
+  stopped_at: number | null;
+};
+
+export type LiveStrategyCreatePayload = {
+  backtest_id: string;
+  name?: string;
+  mode?: "observe" | "paper" | "manual";
+};
+
 export async function fetchSummary(force = false): Promise<DataSummary> {
   return request(`/api/data-source/summary?force=${force ? "true" : "false"}`);
 }
@@ -944,6 +1190,90 @@ export async function createBacktestRunFromSignalSet(payload: SignalSetBacktestR
     {
       timeoutMs: 120_000,
       timeoutMessage: "基于异动表的回测请求超时：超过 120 秒还没有返回，请缩短区间或降低异动数量。",
+    },
+  );
+}
+
+export async function fetchLiveStrategies(): Promise<{ items: LiveStrategy[] }> {
+  return request("/api/live-strategies");
+}
+
+export async function fetchLiveStrategy(strategyId: string): Promise<LiveStrategy> {
+  return request(`/api/live-strategies/${encodeURIComponent(strategyId)}`);
+}
+
+export async function createLiveStrategyFromBacktest(payload: LiveStrategyCreatePayload): Promise<LiveStrategy> {
+  return request(
+    "/api/live-strategies/from-backtest",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    {
+      timeoutMs: 120_000,
+      timeoutMessage: "添加到实盘超时：策略包冻结超过 120 秒，请稍后重试。",
+    },
+  );
+}
+
+export async function updateLiveStrategyStatus(
+  strategyId: string,
+  status: "running" | "paused" | "stopped" | "tripped",
+): Promise<LiveStrategy> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/status`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    },
+  );
+}
+
+export async function updateLiveStrategyMode(
+  strategyId: string,
+  mode: "observe" | "paper" | "manual",
+): Promise<LiveStrategy> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/mode`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+export async function renameLiveStrategy(strategyId: string, name: string): Promise<LiveStrategy> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/rename`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+}
+
+export async function runLiveStrategyShadow(strategyId: string): Promise<LiveStrategy> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/recheck`,
+    { method: "POST" },
+    {
+      timeoutMs: 180_000,
+      timeoutMessage: "生成跟踪回测超时：影子验证超过 180 秒，请稍后重试。",
+    },
+  );
+}
+
+export async function refreshLiveStrategyBacktest(strategyId: string): Promise<LiveStrategy> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/refresh-backtest`,
+    { method: "POST" },
+    {
+      timeoutMs: 180_000,
+      timeoutMessage: "更新回测超时：刷新到最新交易日超过 180 秒，请稍后重试。",
     },
   );
 }
