@@ -521,6 +521,7 @@ class SignalPoolService:
         config: dict[str, Any],
         signal_set: dict[str, Any],
         events: list[dict[str, Any]],
+        initial_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         entry_timeframe = config["entry_timeframe"]
@@ -572,12 +573,22 @@ class SignalPoolService:
             )
         )
 
-        open_positions: list[dict[str, Any]] = []
+        initial_state = initial_state if isinstance(initial_state, dict) else {}
+        initial_positions = initial_state.get("open_positions") if isinstance(initial_state.get("open_positions"), list) else []
+        open_positions: list[dict[str, Any]] = [
+            {
+                "inst_id": str(item.get("inst_id") or ""),
+                "exit_ts": int(item.get("exit_ts") or 0),
+                "pnl_usdt": float(item.get("pnl_usdt") or 0),
+            }
+            for item in initial_positions
+            if isinstance(item, dict) and item.get("inst_id") and item.get("exit_ts")
+        ]
         trades: list[dict[str, Any]] = []
         opened_by_confirm: dict[int, int] = {}
         position_usdt = float(config["position_usdt"])
         initial_capital = position_usdt * int(config["max_positions"])
-        realized_pnl = 0.0
+        realized_pnl = float(initial_state.get("realized_pnl") or 0)
 
         for candidate in entry_candidates:
             inst_id = str(candidate.event.get("inst_id") or "")

@@ -667,6 +667,7 @@ export type BacktestRun = {
 export type LiveStrategyMode = "observe" | "paper" | "manual" | string;
 export type LiveStrategyStatus = "running" | "paused" | "stopped" | "tripped" | string;
 export type LiveVerificationStatus = "shadow_verifying" | "waiting_for_live_data" | "verified" | "needs_review" | string;
+export type LiveBacktestRefreshMode = "incremental" | "full";
 
 export type LiveStrategyPackage = {
   engine_version: string;
@@ -843,9 +844,12 @@ export type LiveLifecycle = {
 export type LiveRuntimeState = {
   refreshed_backtest?: {
     updated_at?: number;
+    mode?: LiveBacktestRefreshMode | string;
+    refresh_id?: string;
     start_date?: string;
     end_date?: string;
     signal_summary?: Record<string, unknown>;
+    meta?: Record<string, unknown>;
     result?: BacktestResult;
   };
   current_positions?: Array<Record<string, unknown>>;
@@ -878,6 +882,28 @@ export type LiveRuntimeState = {
   last_status_change_reason?: string;
   last_mode_change_at?: number;
   last_mode?: string;
+};
+
+export type LiveBotRuntimeStatus = {
+  strategy_id: string;
+  generated: boolean;
+  status: "not_generated" | "generated" | "running" | "stopped" | "crashed" | string;
+  running: boolean;
+  pid?: number | null;
+  root: string;
+  bot_path: string;
+  config_path: string;
+  manifest: Record<string, unknown>;
+  config: Record<string, unknown>;
+  positions: Record<string, Record<string, unknown>>;
+  trades: Array<Record<string, unknown>>;
+  watchlist: Array<Record<string, unknown>>;
+  handled_signals: Record<string, Record<string, unknown>>;
+  logs: {
+    latest: string;
+    stdout: string;
+    stderr: string;
+  };
 };
 
 export type LiveStrategy = {
@@ -1267,15 +1293,66 @@ export async function runLiveStrategyShadow(strategyId: string): Promise<LiveStr
   );
 }
 
-export async function refreshLiveStrategyBacktest(strategyId: string): Promise<LiveStrategy> {
+export async function refreshLiveStrategyBacktest(
+  strategyId: string,
+  mode: LiveBacktestRefreshMode = "incremental",
+): Promise<LiveStrategy> {
   return request(
     `/api/live-strategies/${encodeURIComponent(strategyId)}/refresh-backtest`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    },
     {
       timeoutMs: 180_000,
       timeoutMessage: "更新回测超时：刷新到最新交易日超过 180 秒，请稍后重试。",
     },
   );
+}
+
+export async function generateLiveBot(strategyId: string): Promise<LiveBotRuntimeStatus> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/bot/generate`,
+    { method: "POST" },
+    {
+      timeoutMs: 120_000,
+      timeoutMessage: "生成实盘脚本超时：请稍后重试。",
+    },
+  );
+}
+
+export async function startLiveBot(strategyId: string): Promise<LiveBotRuntimeStatus> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/bot/start`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm_real_trade: true }),
+    },
+  );
+}
+
+export async function stopLiveBot(strategyId: string): Promise<LiveBotRuntimeStatus> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/bot/stop`,
+    { method: "POST" },
+  );
+}
+
+export async function restartLiveBot(strategyId: string): Promise<LiveBotRuntimeStatus> {
+  return request(
+    `/api/live-strategies/${encodeURIComponent(strategyId)}/bot/restart`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm_real_trade: true }),
+    },
+  );
+}
+
+export async function fetchLiveBotStatus(strategyId: string, tailChars = 12000): Promise<LiveBotRuntimeStatus> {
+  return request(`/api/live-strategies/${encodeURIComponent(strategyId)}/bot/status?tail_chars=${tailChars}`);
 }
 
 export async function queryScreener(params: {

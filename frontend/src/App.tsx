@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import ConfigProvider from "antd/es/config-provider";
 import Table from "antd/es/table";
 import type { ColumnsType } from "antd/es/table";
@@ -15,6 +15,8 @@ import {
   DataSummary,
   Indicator,
   IndicatorCatalogResponse,
+  LiveBotRuntimeStatus,
+  LiveBacktestRefreshMode,
   LiveStrategy,
   ScreenerFavorite,
   ScreenerFavoriteCondition,
@@ -44,6 +46,7 @@ import {
   fetchDataQualitySummary,
   fetchIndicatorValuePreview,
   fetchIndicators,
+  fetchLiveBotStatus,
   fetchLiveStrategies,
   fetchLiveStrategy,
   fetchScreenerFavorites,
@@ -57,12 +60,12 @@ import {
   queryScreener,
   refreshLiveStrategyBacktest,
   renameLiveStrategy,
-  runLiveStrategyShadow,
   saveScriptIndicatorScript,
   startContractUpdateDeploy,
+  startLiveBot,
+  stopLiveBot,
   trialRunScriptIndicator,
   updateIndicator,
-  updateLiveStrategyStatus,
 } from "./api";
 
 const navItems = ["选币查询", "回测验证", "实盘跟踪", "合约列表", "指标生产", "指标仓库"];
@@ -2347,6 +2350,13 @@ function LiveTrackingPage({
   const [error, setError] = useState<string | null>(null);
   const [selectedBacktestDate, setSelectedBacktestDate] = useState<string | null>(null);
   const [selectedLiveDate, setSelectedLiveDate] = useState<string | null>(null);
+  const [botStatus, setBotStatus] = useState<LiveBotRuntimeStatus | null>(null);
+  const [botUpdating, setBotUpdating] = useState(false);
+  const [botLogTab, setBotLogTab] = useState<"latest" | "stdout" | "stderr">("latest");
+  const [botModal, setBotModal] = useState<"logs" | null>(null);
+  const [startConfirmOpen, setStartConfirmOpen] = useState(false);
+  const [refreshModeModalOpen, setRefreshModeModalOpen] = useState(false);
+  const [refreshMode, setRefreshMode] = useState<LiveBacktestRefreshMode>("incremental");
   const initialPreferredStrategyId = useRef(preferredStrategyId ?? null);
 
   useEffect(() => {
@@ -2368,6 +2378,30 @@ function LiveTrackingPage({
       onPreferredStrategyConsumed?.();
     });
   }, [preferredStrategyId]);
+
+  useEffect(() => {
+    if (!activeStrategy?.id) {
+      setBotStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const loadBot = async () => {
+      try {
+        const status = await fetchLiveBotStatus(activeStrategy.id);
+        if (!cancelled) setBotStatus(status);
+      } catch {
+        if (!cancelled) setBotStatus(null);
+      }
+    };
+    void loadBot();
+    const timer = window.setInterval(() => {
+      void loadBot();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeStrategy?.id]);
 
   async function loadStrategies(targetStrategyId?: string | null) {
     setLoading(true);
@@ -2452,12 +2486,13 @@ function LiveTrackingPage({
     }
   }
 
-  async function refreshBacktestTracking() {
+  async function refreshBacktestTracking(mode: LiveBacktestRefreshMode) {
     if (!activeStrategy) return;
     setUpdating(true);
+    setRefreshModeModalOpen(false);
     setError(null);
     try {
-      const item = await refreshLiveStrategyBacktest(activeStrategy.id);
+      const item = await refreshLiveStrategyBacktest(activeStrategy.id, mode);
       setActiveStrategy(item);
       setSelectedBacktestDate(defaultBacktestLifecycleDate(item));
       setSelectedLiveDate((current) => current ?? defaultLiveLifecycleDate(item));
@@ -2469,23 +2504,39 @@ function LiveTrackingPage({
     }
   }
 
-  async function startLiveTracking() {
+  async function startBotProcess() {
     if (!activeStrategy) return;
-    setUpdating(true);
+    setBotUpdating(true);
     setError(null);
     try {
-      if (activeStrategy.status !== "running") {
-        await updateLiveStrategyStatus(activeStrategy.id, "running");
-      }
-      const item = await runLiveStrategyShadow(activeStrategy.id);
-      setActiveStrategy(item);
-      setSelectedBacktestDate((current) => current ?? defaultBacktestLifecycleDate(item));
-      setSelectedLiveDate(defaultLiveLifecycleDate(item));
-      upsertLiveStrategy(item);
+      const status = await startLiveBot(activeStrategy.id);
+      setBotStatus(status);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "启动实盘失败");
+      setError(err instanceof Error ? err.message : "启动真实实盘失败");
     } finally {
-      setUpdating(false);
+      setBotUpdating(false);
+    }
+  }
+
+  async function stopBotProcess() {
+    if (!activeStrategy) return;
+    setBotUpdating(true);
+    setError(null);
+    try {
+      const status = await stopLiveBot(activeStrategy.id);
+      setBotStatus(status);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "停止真实实盘失败");
+    } finally {
+      setBotUpdating(false);
+    }
+  }
+
+  async function toggleBotProcess() {
+    if (botStatus?.running) {
+      await stopBotProcess();
+    } else {
+      setStartConfirmOpen(true);
     }
   }
 
@@ -2586,11 +2637,11 @@ function LiveTrackingPage({
           <div className="live-compare-grid">
             <section className="live-compare-panel">
               <LiveLifecycleChart
-                actionLabel="更新回测"
-                actionDisabled={loadingDetail}
+                actionLabel={updating ? "更新中..." : "更新回测"}
+                actionDisabled={updating || loadingDetail}
                 emptyText="来源回测曲线为空。"
                 metricKey="backtest_return_pct"
-                onAction={() => void refreshBacktestTracking()}
+                onAction={() => setRefreshModeModalOpen(true)}
                 onSelectDate={setSelectedBacktestDate}
                 phaseLabel="回测"
                 points={backtestCurve}
@@ -2607,11 +2658,16 @@ function LiveTrackingPage({
             </section>
             <section className="live-compare-panel">
               <LiveLifecycleChart
-                actionLabel="启动实盘"
-                actionDisabled={updating}
-                emptyText="启动实盘后，这里展示实盘曲线。"
+                emptyText="启动真实实盘后，这里展示实盘曲线。"
+                headerAction={(
+                  <LiveBotChartActions
+                    botStatus={botStatus}
+                    disabled={botUpdating || loadingDetail}
+                    onOpenLogs={() => setBotModal("logs")}
+                    onToggle={() => void toggleBotProcess()}
+                  />
+                )}
                 metricKey="live_return_pct"
-                onAction={() => void startLiveTracking()}
                 onSelectDate={selectLiveDate}
                 phaseLabel="实盘"
                 points={liveCurve}
@@ -2627,22 +2683,222 @@ function LiveTrackingPage({
               />
             </section>
           </div>
+
+          {botModal === "logs" && (
+            <LiveBotLogsModal
+              botStatus={botStatus}
+              logTab={botLogTab}
+              onClose={() => setBotModal(null)}
+              onSelectLogTab={setBotLogTab}
+            />
+          )}
+          {startConfirmOpen && (
+            <LiveStartConfirmModal
+              botStatus={botStatus}
+              loading={botUpdating}
+              onCancel={() => setStartConfirmOpen(false)}
+              onConfirm={() => {
+                setStartConfirmOpen(false);
+                void startBotProcess();
+              }}
+              strategyName={activeStrategy.name}
+            />
+          )}
+          {refreshModeModalOpen && (
+            <BacktestRefreshModeModal
+              latestDate={activeStrategy.lifecycle?.summary?.latest_date ?? null}
+              loading={updating}
+              mode={refreshMode}
+              onCancel={() => setRefreshModeModalOpen(false)}
+              onConfirm={() => void refreshBacktestTracking(refreshMode)}
+              onSelectMode={setRefreshMode}
+              strategy={activeStrategy}
+            />
+          )}
         </div>
       )}
     </section>
   );
 }
 
-function LiveConfigGroup({ title, items }: { title: string; items: Array<[string, string]> }) {
+function LiveBotChartActions({
+  botStatus,
+  disabled,
+  onOpenLogs,
+  onToggle,
+}: {
+  botStatus: LiveBotRuntimeStatus | null;
+  disabled: boolean;
+  onOpenLogs: () => void;
+  onToggle: () => void;
+}) {
+  const isRunning = Boolean(botStatus?.running);
   return (
-    <div className="live-config-group">
-      <strong>{title}</strong>
-      {items.map(([label, value]) => (
-        <span key={`${title}-${label}`}>
-          <em>{label}</em>
-          <b title={value}>{value}</b>
-        </span>
-      ))}
+    <div className="live-chart-bot-actions">
+      <button
+        className={isRunning ? "primary-action live-running-action" : "primary-action live-start-action"}
+        disabled={disabled}
+        onClick={onToggle}
+      >
+        {isRunning ? "运行中" : "开始实盘"}
+      </button>
+      <button className="secondary-action" disabled={!botStatus?.generated} onClick={onOpenLogs}>日志</button>
+    </div>
+  );
+}
+
+function LiveBotLogsModal({
+  botStatus,
+  logTab,
+  onClose,
+  onSelectLogTab,
+}: {
+  botStatus: LiveBotRuntimeStatus | null;
+  logTab: "latest" | "stdout" | "stderr";
+  onClose: () => void;
+  onSelectLogTab: (tab: "latest" | "stdout" | "stderr") => void;
+}) {
+  const logText = botStatus?.logs?.[logTab] || "";
+  const isRunning = Boolean(botStatus?.running);
+  return (
+    <div className="modal-backdrop live-bot-modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <div className="live-bot-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="live-bot-modal-head">
+          <div>
+            <span>Live Runtime Log</span>
+            <h2>实盘运行日志</h2>
+          </div>
+          <strong className={isRunning ? "up" : botStatus?.status === "crashed" ? "down" : ""}>{liveBotStatusLabel(botStatus?.status)}</strong>
+          <button className="secondary-action" onClick={onClose}>关闭</button>
+        </div>
+        <div className="live-bot-modal-meta">
+          <span>PID <b>{botStatus?.pid ?? "--"}</b></span>
+          <span>目录 <b title={botStatus?.root || ""}>{botStatus?.root || "--"}</b></span>
+        </div>
+        <div className="live-bot-modal-toolbar">
+          <div className="live-log-tabs">
+            {(["latest", "stdout", "stderr"] as const).map((tab) => (
+              <button className={tab === logTab ? "active" : ""} key={tab} onClick={() => onSelectLogTab(tab)}>
+                {tab === "latest" ? "策略日志" : tab}
+              </button>
+            ))}
+          </div>
+        </div>
+        <pre className="live-bot-modal-pre">{logText || "暂无日志。启动实盘后，后台进程会持续写入这里。"}</pre>
+      </div>
+    </div>
+  );
+}
+
+function BacktestRefreshModeModal({
+  latestDate,
+  loading,
+  mode,
+  onCancel,
+  onConfirm,
+  onSelectMode,
+  strategy,
+}: {
+  latestDate: string | null;
+  loading: boolean;
+  mode: LiveBacktestRefreshMode;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onSelectMode: (mode: LiveBacktestRefreshMode) => void;
+  strategy: LiveStrategy;
+}) {
+  const refreshed = strategy.runtime_state?.refreshed_backtest;
+  const sourceEndDate = strategy.strategy_package?.signal?.end_date ?? "--";
+  const refreshedEndDate = refreshed?.end_date ?? sourceEndDate;
+  const lastMode = refreshed?.mode === "full" ? "全量重算" : refreshed?.mode === "incremental" ? "增量延续" : "未更新";
+  return (
+    <div className="modal-backdrop live-refresh-modal-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div className="live-refresh-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="live-refresh-modal-head">
+          <span>Backtest Refresh</span>
+          <h2>更新回测历史</h2>
+          <p>{strategy.name}</p>
+        </div>
+        <div className="live-refresh-state">
+          <span><em>冻结截止</em><b>{sourceEndDate}</b></span>
+          <span><em>当前刷新到</em><b>{refreshedEndDate}</b></span>
+          <span><em>曲线最新点</em><b>{latestDate ?? "--"}</b></span>
+          <span><em>上次模式</em><b>{lastMode}</b></span>
+        </div>
+        <div className="live-refresh-options" role="radiogroup" aria-label="选择回测更新模式">
+          <button
+            className={mode === "incremental" ? "active" : ""}
+            type="button"
+            onClick={() => onSelectMode("incremental")}
+          >
+            <strong>增量延续</strong>
+            <span>默认推荐，只重放上次截止日前后的一段缓冲区，再合并历史曲线。</span>
+            <em>速度快，适合日常更新到最新完整交易日。</em>
+          </button>
+          <button
+            className={mode === "full" ? "active" : ""}
+            type="button"
+            onClick={() => onSelectMode("full")}
+          >
+            <strong>全量重算</strong>
+            <span>从冻结策略的原始开始日期重新扫描并回测到最新完整交易日。</span>
+            <em>更慢，适合行情数据修复或怀疑历史结果被污染时使用。</em>
+          </button>
+        </div>
+        <div className="live-refresh-note">
+          <strong>不会改动原始回测验证记录。</strong>
+          <p>更新结果只写入当前实盘实例，用于左侧历史曲线继续延展，并和右侧真实实盘结果做人工对比。</p>
+        </div>
+        <div className="live-refresh-actions">
+          <button className="secondary-action" disabled={loading} onClick={onCancel}>取消</button>
+          <button className="primary-action" disabled={loading} onClick={onConfirm}>
+            {loading ? "更新中..." : mode === "full" ? "开始全量重算" : "开始增量更新"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LiveStartConfirmModal({
+  botStatus,
+  loading,
+  onCancel,
+  onConfirm,
+  strategyName,
+}: {
+  botStatus: LiveBotRuntimeStatus | null;
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  strategyName: string;
+}) {
+  const risk = (botStatus?.config?.risk_guard && typeof botStatus.config.risk_guard === "object" ? botStatus.config.risk_guard : {}) as Record<string, unknown>;
+  return (
+    <div className="modal-backdrop live-start-confirm-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div className="live-start-confirm-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="live-start-confirm-head">
+          <span>Real Trade Confirmation</span>
+          <h2>启动真实实盘</h2>
+          <p>{strategyName}</p>
+        </div>
+        <div className="live-start-confirm-risk">
+          <span><em>总资金硬上限</em><b>{formatOptionalNumber(Number(risk.max_total_cap_usd ?? 10))}U</b></span>
+          <span><em>单笔上限</em><b>{formatOptionalNumber(Number(risk.capital_per_trade_usd ?? 10))}U</b></span>
+          <span><em>杠杆上限</em><b>{formatOptionalNumber(Number(risk.leverage ?? 1))}x</b></span>
+          <span><em>最大持仓</em><b>{String(risk.max_positions ?? 1)}</b></span>
+        </div>
+        <div className="live-start-confirm-note">
+          <strong>这会启动后台真实交易脚本。</strong>
+          <p>脚本可能连接交易所并在满足信号后下市价单。平台会强制使用小资金验证参数，主要用于观察实盘信号和交易执行。</p>
+        </div>
+        <div className="live-start-confirm-actions">
+          <button className="secondary-action" disabled={loading} onClick={onCancel}>取消</button>
+          <button className="primary-action live-start-action" disabled={loading} onClick={onConfirm}>
+            {loading ? "启动中..." : "确认启动"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2651,6 +2907,7 @@ function LiveLifecycleChart({
   actionLabel,
   actionDisabled = false,
   emptyText,
+  headerAction,
   metricKey,
   onAction,
   onSelectDate,
@@ -2660,11 +2917,12 @@ function LiveLifecycleChart({
   title,
   tradeSource,
 }: {
-  actionLabel: string;
+  actionLabel?: string;
   actionDisabled?: boolean;
   emptyText: string;
+  headerAction?: ReactNode;
   metricKey: "backtest_return_pct" | "live_return_pct";
-  onAction: () => void;
+  onAction?: () => void;
   onSelectDate: (date: string) => void;
   phaseLabel: string;
   points: LiveStrategy["lifecycle"]["curve"];
@@ -2681,7 +2939,10 @@ function LiveLifecycleChart({
             <strong>--</strong>
             <em>{phaseLabel}</em>
           </div>
-          <button className="primary-action live-chart-action" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+          {actionLabel && onAction && (
+            <button className="primary-action live-chart-action" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+          )}
+          {headerAction}
         </div>
         <EmptyState title="暂无曲线" text={emptyText} />
       </div>
@@ -2779,7 +3040,10 @@ function LiveLifecycleChart({
             <em>成交</em>
             <b>{selectedTradeCount}</b>
           </span>
-          <button className="primary-action live-chart-action" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+          {actionLabel && onAction && (
+            <button className="primary-action live-chart-action" disabled={actionDisabled} onClick={onAction}>{actionLabel}</button>
+          )}
+          {headerAction}
         </div>
       </div>
       <svg
@@ -2938,41 +3202,6 @@ function LiveDailyTradeDetailTable({
             })}
           </tbody>
         </table>
-      </div>
-    </div>
-  );
-}
-
-function LiveDailyInspector({
-  point,
-  detail,
-  markerDate,
-}: {
-  point: LiveStrategy["lifecycle"]["curve"][number] | null;
-  detail: LiveStrategy["lifecycle"]["daily_details"][number] | null;
-  markerDate?: string | null;
-}) {
-  return (
-    <div className="backtest-card live-day-inspector">
-      <div className="backtest-card-head">
-        <span className="eyebrow">Selected Day</span>
-        <strong>{point?.date ?? "--"}</strong>
-        <em>{point?.date === markerDate ? "实盘开启" : point?.phase === "live" ? "实盘段" : "历史段"}</em>
-      </div>
-      <div className="live-day-metrics">
-        <span>历史收益 <b className={numberTone(Number(point?.backtest_return_pct ?? 0))}>{point?.backtest_return_pct === undefined || point?.backtest_return_pct === null ? "--" : formatPercent(point.backtest_return_pct)}</b></span>
-        <span>影子收益 <b className={numberTone(Number(point?.shadow_return_pct ?? 0))}>{point?.shadow_return_pct === undefined || point?.shadow_return_pct === null ? "--" : formatPercent(point.shadow_return_pct)}</b></span>
-        <span>实盘收益 <b className={numberTone(Number(point?.live_return_pct ?? 0))}>{point?.live_return_pct === undefined || point?.live_return_pct === null ? "--" : formatPercent(point.live_return_pct)}</b></span>
-        <span>当日PnL <b className={numberTone(Number(point?.live_daily_pnl ?? point?.daily_pnl ?? 0))}>{formatSignedNumber(Number(point?.live_daily_pnl ?? point?.daily_pnl ?? 0))}U</b></span>
-        <span>信号 <b>{detail?.signal_count ?? point?.signal_count ?? 0}</b></span>
-        <span>交易 <b>{(detail?.live_trades?.length || detail?.shadow_trades?.length || detail?.backtest_trades?.length || point?.trade_count || 0)}</b></span>
-      </div>
-      <div className="live-day-note">
-        {point?.date === markerDate
-          ? "这一天是历史回测复制到实盘生命周期的分界点，后续曲线按实盘开启权益重新计量。"
-          : point?.phase === "live"
-            ? "实盘开启后的自然日表现，影子回测和实盘/纸面交易会在这里并行展示。"
-            : "来源回测的历史自然日表现，复制到实盘页用于展示策略上线前表现。"}
       </div>
     </div>
   );
@@ -5720,6 +5949,15 @@ function liveStatusLabel(status: string | undefined) {
   if (status === "stopped") return "已停止";
   if (status === "tripped") return "已熔断";
   return status || "--";
+}
+
+function liveBotStatusLabel(status: string | undefined) {
+  if (status === "running") return "后台运行中";
+  if (status === "generated") return "脚本已生成";
+  if (status === "stopped") return "已停止";
+  if (status === "crashed") return "异常退出";
+  if (status === "not_generated") return "未生成";
+  return status || "未生成";
 }
 
 function liveStatusTone(status: string | undefined) {

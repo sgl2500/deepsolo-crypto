@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -18,7 +19,10 @@ from .signal_pool_service import signal_pool_service
 LIVE_ENGINE_VERSION = "live-shadow-v1"
 SUPPORTED_MODES = {"observe", "paper", "manual"}
 SUPPORTED_STATUSES = {"running", "paused", "stopped", "tripped"}
+SUPPORTED_REFRESH_MODES = {"incremental", "full"}
 REQUIRED_MATCHED_TRADES = 3
+MIN_INCREMENTAL_LOOKBACK_DAYS = 7
+MAX_INCREMENTAL_LOOKBACK_DAYS = 90
 APP_TZ = ZoneInfo(APP_TIMEZONE)
 
 
@@ -350,7 +354,8 @@ class LiveStrategyService:
     def rerun_consistency_check(self, strategy_id: str) -> dict[str, Any]:
         return self.run_shadow_verification(strategy_id)
 
-    def refresh_backtest_history(self, strategy_id: str) -> dict[str, Any]:
+    def refresh_backtest_history(self, strategy_id: str, mode: str = "incremental") -> dict[str, Any]:
+        refresh_mode = self._normalize_refresh_mode(mode)
         current = self.get_strategy(strategy_id)
         if not current:
             raise KeyError(f"实盘策略不存在：{strategy_id}")
@@ -385,30 +390,31 @@ class LiveStrategyService:
 
         refresh_id = uuid.uuid4().hex
         signal_mode = str(signal.get("signal_mode") or "each_bar_close")
-        signal_set = {
-            "id": f"live_refresh_{refresh_id}",
-            "favorite_id": str(signal.get("favorite_id") or favorite.get("id") or ""),
-            "name": f"实盘回测刷新 {start_date}~{end_date}",
-            "status": "completed",
-            "config": {
-                "favorite_id": str(signal.get("favorite_id") or favorite.get("id") or ""),
-                "favorite_name": str(favorite.get("name") or ""),
-                "name": f"实盘回测刷新 {start_date}~{end_date}",
-                "start_date": start_date,
-                "end_date": end_date,
-                "signal_timeframe": signal_timeframe,
-                "signal_mode": signal_mode,
-                "checkpoint_limit": int(signal.get("checkpoint_limit") or 5000),
-            },
-            "favorite": favorite,
-            "summary": {},
-            "error": "",
-        }
-        events, signal_summary = signal_pool_service._build_signal_events(signal_set["id"], favorite, signal_set["config"])
-        signal_set["summary"] = signal_summary
-        backtest_config = self._build_shadow_backtest_config(backtest, package, signal_set)
-        backtest_config["name"] = signal_set["name"]
-        result = signal_pool_service._execute_signal_backtest(backtest_config, signal_set, events)
+        if refresh_mode == "full":
+            result, signal_summary, refresh_meta = self._run_full_backtest_refresh(
+                backtest=backtest,
+                package=package,
+                signal=signal,
+                favorite=favorite,
+                refresh_id=refresh_id,
+                start_date=start_date,
+                end_date=end_date,
+                signal_timeframe=signal_timeframe,
+                signal_mode=signal_mode,
+            )
+        else:
+            result, signal_summary, refresh_meta = self._run_incremental_backtest_refresh(
+                current=current,
+                backtest=backtest,
+                package=package,
+                signal=signal,
+                favorite=favorite,
+                refresh_id=refresh_id,
+                start_date=start_date,
+                end_date=end_date,
+                signal_timeframe=signal_timeframe,
+                signal_mode=signal_mode,
+            )
 
         now = _now_ms()
         runtime = current.get("runtime_state") if isinstance(current.get("runtime_state"), dict) else {}
@@ -416,9 +422,12 @@ class LiveStrategyService:
             **runtime,
             "refreshed_backtest": {
                 "updated_at": now,
+                "mode": refresh_mode,
+                "refresh_id": refresh_id,
                 "start_date": start_date,
                 "end_date": end_date,
                 "signal_summary": signal_summary,
+                "meta": refresh_meta,
                 "result": result,
             },
         }
@@ -443,6 +452,360 @@ class LiveStrategyService:
         if item is None:
             raise RuntimeError("回测刷新结果更新失败")
         return item
+
+    def _run_full_backtest_refresh(
+        self,
+        *,
+        backtest: dict[str, Any],
+        package: dict[str, Any],
+        signal: dict[str, Any],
+        favorite: dict[str, Any],
+        refresh_id: str,
+        start_date: str,
+        end_date: str,
+        signal_timeframe: str,
+        signal_mode: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        signal_set = self._refresh_signal_set(
+            signal=signal,
+            favorite=favorite,
+            refresh_id=refresh_id,
+            start_date=start_date,
+            end_date=end_date,
+            signal_timeframe=signal_timeframe,
+            signal_mode=signal_mode,
+            name=f"实盘回测全量重算 {start_date}~{end_date}",
+        )
+        events, signal_summary = signal_pool_service._build_signal_events(signal_set["id"], favorite, signal_set["config"])
+        signal_set["summary"] = signal_summary
+        backtest_config = self._build_shadow_backtest_config(backtest, package, signal_set)
+        backtest_config["name"] = signal_set["name"]
+        result = signal_pool_service._execute_signal_backtest(backtest_config, signal_set, events)
+        return (
+            result,
+            signal_summary,
+            {
+                "refresh_mode": "full",
+                "replay_start_date": start_date,
+                "preserved_trade_count": 0,
+                "replayed_trade_count": len(result.get("trades") if isinstance(result.get("trades"), list) else []),
+                "lookback_days": None,
+            },
+        )
+
+    def _run_incremental_backtest_refresh(
+        self,
+        *,
+        current: dict[str, Any],
+        backtest: dict[str, Any],
+        package: dict[str, Any],
+        signal: dict[str, Any],
+        favorite: dict[str, Any],
+        refresh_id: str,
+        start_date: str,
+        end_date: str,
+        signal_timeframe: str,
+        signal_mode: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        runtime = current.get("runtime_state") if isinstance(current.get("runtime_state"), dict) else {}
+        refreshed = runtime.get("refreshed_backtest") if isinstance(runtime.get("refreshed_backtest"), dict) else {}
+        base_result = refreshed.get("result") if isinstance(refreshed.get("result"), dict) else None
+        if base_result is None:
+            base_result = backtest.get("result") if isinstance(backtest.get("result"), dict) else None
+        if not isinstance(base_result, dict):
+            raise ValueError("来源回测结果为空，无法增量更新")
+
+        marker_date = str(signal.get("end_date") or "")
+        anchor_date = str(refreshed.get("end_date") or marker_date or start_date)
+        lookback_days = self._incremental_lookback_days(package, favorite)
+        merge_start_date = self._bounded_replay_start(start_date, anchor_date, lookback_days)
+        event_start_date = self._bounded_replay_start(start_date, merge_start_date, self._trade_replay_buffer_days(package))
+        merge_start_ts = _date_start_ms(merge_start_date)
+        event_start_ts = _date_start_ms(event_start_date)
+
+        signal_set = self._refresh_signal_set(
+            signal=signal,
+            favorite=favorite,
+            refresh_id=refresh_id,
+            start_date=event_start_date,
+            end_date=end_date,
+            signal_timeframe=signal_timeframe,
+            signal_mode=signal_mode,
+            name=f"实盘回测增量重放 {event_start_date}~{end_date}",
+        )
+        events, signal_summary = self._build_continuous_signal_events(
+            current,
+            signal_set["id"],
+            favorite,
+            signal_set["config"],
+            marker_date,
+            end_date,
+            min_date=event_start_date,
+        )
+        signal_set["summary"] = signal_summary
+        backtest_config = self._build_shadow_backtest_config(backtest, package, signal_set)
+        backtest_config["name"] = signal_set["name"]
+
+        base_trades = base_result.get("trades") if isinstance(base_result.get("trades"), list) else []
+        prior_trades = [trade for trade in base_trades if isinstance(trade, dict) and (_safe_int(trade.get("exit_ts")) or 0) < merge_start_ts]
+        boundary_trades = [
+            trade
+            for trade in base_trades
+            if isinstance(trade, dict)
+            and (_safe_int(trade.get("confirm_ts")) or 0) < event_start_ts
+            and (_safe_int(trade.get("exit_ts")) or 0) >= merge_start_ts
+        ]
+        realized_before_replay = sum(
+            float(trade.get("pnl_usdt") or 0)
+            for trade in base_trades
+            if isinstance(trade, dict)
+            and (_safe_int(trade.get("exit_ts")) or 0) <= event_start_ts
+        )
+        carried_positions = [
+            {
+                "inst_id": trade.get("inst_id"),
+                "exit_ts": trade.get("exit_ts"),
+                "pnl_usdt": trade.get("pnl_usdt"),
+            }
+            for trade in base_trades
+            if isinstance(trade, dict)
+            and (_safe_int(trade.get("entry_ts")) or 0) < event_start_ts
+            and (_safe_int(trade.get("exit_ts")) or 0) > event_start_ts
+        ]
+        replay_result = signal_pool_service._execute_signal_backtest(
+            backtest_config,
+            signal_set,
+            events,
+            {
+                "realized_pnl": realized_before_replay,
+                "open_positions": carried_positions,
+            },
+        )
+        replay_trades = replay_result.get("trades") if isinstance(replay_result.get("trades"), list) else []
+        replay_kept_trades = [
+            trade
+            for trade in replay_trades
+            if isinstance(trade, dict) and (_safe_int(trade.get("exit_ts")) or 0) >= merge_start_ts
+        ]
+        merged_trades = _renumber_trades([*prior_trades, *boundary_trades, *replay_kept_trades])
+        merged_checkpoints = self._merged_refresh_checkpoints(base_result, replay_result, merge_start_ts)
+        merged_signal_summary = self._merged_refresh_signal_summary(
+            base_result=base_result,
+            replay_summary=signal_summary,
+            checkpoints=merged_checkpoints,
+            new_event_count=sum(1 for event in events if str(event.get("confirm_time") or "")[:10] > anchor_date),
+            new_checkpoint_count=len({int(event.get("confirm_ts") or 0) for event in events if str(event.get("confirm_time") or "")[:10] > anchor_date}),
+            start_date=start_date,
+            end_date=end_date,
+            signal_timeframe=signal_timeframe,
+            signal_mode=signal_mode,
+            preserved_trades=prior_trades,
+            replay_trades=replay_kept_trades,
+        )
+        merged_signal_set = {
+            **signal_set,
+            "name": f"实盘回测增量结果 {start_date}~{end_date}",
+            "config": {
+                **signal_set["config"],
+                "start_date": start_date,
+                "end_date": end_date,
+                "name": f"实盘回测增量结果 {start_date}~{end_date}",
+            },
+            "summary": merged_signal_summary,
+        }
+        counters = self._merged_refresh_counters(base_result, replay_result, merged_signal_summary, merged_trades)
+        summary, equity, daily_equity = signal_pool_service._summarize(backtest_config, merged_signal_set, counters, merged_trades)
+        summary["duration_ms"] = int((base_result.get("summary") or {}).get("duration_ms") or 0) + int((replay_result.get("summary") or {}).get("duration_ms") or 0)
+        result = {
+            "summary": summary,
+            "equity": equity,
+            "daily_equity": daily_equity,
+            "trades": merged_trades,
+            "checkpoints": merged_checkpoints,
+            "favorite": signal_set.get("favorite"),
+            "signal_set": {
+                "id": signal_set["id"],
+                "name": merged_signal_set["name"],
+                "summary": merged_signal_summary,
+            },
+        }
+        return (
+            result,
+            merged_signal_summary,
+            {
+                "refresh_mode": "incremental",
+                "anchor_date": anchor_date,
+                "merge_start_date": merge_start_date,
+                "replay_start_date": event_start_date,
+                "lookback_days": lookback_days,
+                "trade_replay_buffer_days": self._trade_replay_buffer_days(package),
+                "carried_open_positions": len(carried_positions),
+                "preserved_trade_count": len(prior_trades),
+                "boundary_trade_count": len(boundary_trades),
+                "replayed_trade_count": len(replay_kept_trades),
+                "merged_trade_count": len(merged_trades),
+            },
+        )
+
+    def _refresh_signal_set(
+        self,
+        *,
+        signal: dict[str, Any],
+        favorite: dict[str, Any],
+        refresh_id: str,
+        start_date: str,
+        end_date: str,
+        signal_timeframe: str,
+        signal_mode: str,
+        name: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": f"live_refresh_{refresh_id}",
+            "favorite_id": str(signal.get("favorite_id") or favorite.get("id") or ""),
+            "name": name,
+            "status": "completed",
+            "config": {
+                "favorite_id": str(signal.get("favorite_id") or favorite.get("id") or ""),
+                "favorite_name": str(favorite.get("name") or ""),
+                "name": name,
+                "start_date": start_date,
+                "end_date": end_date,
+                "signal_timeframe": signal_timeframe,
+                "signal_mode": signal_mode,
+                "checkpoint_limit": int(signal.get("checkpoint_limit") or 5000),
+            },
+            "favorite": favorite,
+            "summary": {},
+            "error": "",
+        }
+
+    def _incremental_lookback_days(self, package: dict[str, Any], favorite: dict[str, Any]) -> int:
+        entry = package.get("entry") if isinstance(package.get("entry"), dict) else {}
+        exit_cfg = package.get("exit") if isinstance(package.get("exit"), dict) else {}
+        signal = package.get("signal") if isinstance(package.get("signal"), dict) else {}
+        minutes = int(entry.get("entry_window_minutes") or 0) + int(exit_cfg.get("exit_hold_minutes") or 0)
+        lookback = math.ceil(minutes / (24 * 60)) + 3
+        signal_step = _timeframe_minutes(str(signal.get("signal_timeframe") or favorite.get("timeframe") or "1H")) or 60
+        for condition in favorite.get("metadata_conditions") or []:
+            if not isinstance(condition, dict):
+                continue
+            if condition.get("time_mode") == "previous_trading_day":
+                lookback = max(lookback, int(condition.get("time_offset") or 1) + 2)
+            indicator = condition.get("indicator") if isinstance(condition.get("indicator"), dict) else {}
+            period = str(indicator.get("storage_period") or signal.get("signal_timeframe") or favorite.get("timeframe") or "1H")
+            period_minutes = _timeframe_minutes(period) or signal_step
+            mode = str(condition.get("time_point_mode") or "").strip().lower()
+            if mode == "bar_offset":
+                lookback = max(lookback, math.ceil(int(condition.get("bar_offset") or 0) * period_minutes / (24 * 60)) + 2)
+            elif mode == "time_offset":
+                unit = str(condition.get("time_offset_unit") or "hour").strip().lower()
+                unit_minutes = 1 if unit in ("minute", "minutes", "m", "分钟") else 60
+                lookback = max(lookback, math.ceil(int(condition.get("time_offset_value") or 0) * unit_minutes / (24 * 60)) + 2)
+        return max(MIN_INCREMENTAL_LOOKBACK_DAYS, min(MAX_INCREMENTAL_LOOKBACK_DAYS, lookback))
+
+    def _trade_replay_buffer_days(self, package: dict[str, Any]) -> int:
+        entry = package.get("entry") if isinstance(package.get("entry"), dict) else {}
+        exit_cfg = package.get("exit") if isinstance(package.get("exit"), dict) else {}
+        minutes = int(entry.get("entry_window_minutes") or 0) + int(exit_cfg.get("exit_hold_minutes") or 0)
+        return max(2, min(MAX_INCREMENTAL_LOOKBACK_DAYS, math.ceil(minutes / (24 * 60)) + 2))
+
+    def _bounded_replay_start(self, start_date: str, anchor_date: str, lookback_days: int) -> str:
+        try:
+            start = Date.fromisoformat(start_date)
+            anchor = Date.fromisoformat(anchor_date)
+        except ValueError:
+            return start_date
+        replay = anchor - timedelta(days=lookback_days)
+        if replay < start:
+            replay = start
+        return replay.isoformat()
+
+    def _merged_refresh_signal_summary(
+        self,
+        *,
+        base_result: dict[str, Any],
+        replay_summary: dict[str, Any],
+        checkpoints: list[dict[str, Any]],
+        new_event_count: int,
+        new_checkpoint_count: int,
+        start_date: str,
+        end_date: str,
+        signal_timeframe: str,
+        signal_mode: str,
+        preserved_trades: list[dict[str, Any]],
+        replay_trades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        base_signal = base_result.get("signal_set") if isinstance(base_result.get("signal_set"), dict) else {}
+        base_summary = base_signal.get("summary") if isinstance(base_signal.get("summary"), dict) else {}
+        checkpoint_events = sum(int(item.get("matched_count") or 0) for item in checkpoints if isinstance(item, dict))
+        checkpoint_opened = sum(int(item.get("opened_count") or 0) for item in checkpoints if isinstance(item, dict))
+        base_event_count = int(base_summary.get("event_count") or base_summary.get("matched_count") or 0)
+        base_checkpoint_count = int(base_summary.get("checkpoint_count") or 0)
+        return {
+            **base_summary,
+            "start_date": start_date,
+            "end_date": end_date,
+            "signal_timeframe": signal_timeframe,
+            "signal_mode": signal_mode,
+            "checkpoint_count": base_checkpoint_count + new_checkpoint_count,
+            "matched_count": base_event_count + new_event_count,
+            "returned_count": base_event_count + new_event_count,
+            "event_count": base_event_count + new_event_count,
+            "opened_count": checkpoint_opened,
+            "truncated_events": max(int(base_summary.get("truncated_events") or 0), int(replay_summary.get("truncated_events") or 0)),
+            "unique_contracts": None,
+            "total_contracts": replay_summary.get("total_contracts") or base_summary.get("total_contracts"),
+            "last_signal_ts": replay_summary.get("last_signal_ts") or base_summary.get("last_signal_ts"),
+            "last_signal_time": replay_summary.get("last_signal_time") or base_summary.get("last_signal_time"),
+            "last_confirm_ts": replay_summary.get("last_confirm_ts") or base_summary.get("last_confirm_ts"),
+            "last_confirm_time": replay_summary.get("last_confirm_time") or base_summary.get("last_confirm_time"),
+            "duration_ms": int(base_summary.get("duration_ms") or 0) + int(replay_summary.get("duration_ms") or 0),
+            "incremental_preserved_trades": len(preserved_trades),
+            "incremental_replayed_trades": len(replay_trades),
+        }
+
+    def _merged_refresh_counters(
+        self,
+        base_result: dict[str, Any],
+        replay_result: dict[str, Any],
+        signal_summary: dict[str, Any],
+        trades: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        base_summary = base_result.get("summary") if isinstance(base_result.get("summary"), dict) else {}
+        replay_summary = replay_result.get("summary") if isinstance(replay_result.get("summary"), dict) else {}
+        counters: dict[str, int] = {
+            "checkpoints": int(signal_summary.get("checkpoint_count") or 0),
+            "matched_signals": int(signal_summary.get("event_count") or signal_summary.get("matched_count") or 0),
+            "opened_trades": len(trades),
+        }
+        for key in (
+            "skipped_overlap",
+            "skipped_max_positions",
+            "skipped_insufficient_equity",
+            "skipped_account_depleted",
+            "skipped_no_entry",
+            "skipped_no_exit",
+            "skipped_entry_rule",
+        ):
+            counters[key] = max(int(base_summary.get(key) or 0), int(replay_summary.get(key) or 0))
+        return counters
+
+    def _merged_refresh_checkpoints(
+        self,
+        base_result: dict[str, Any],
+        replay_result: dict[str, Any],
+        replay_start_ts: int,
+    ) -> list[dict[str, Any]]:
+        base_items = base_result.get("checkpoints") if isinstance(base_result.get("checkpoints"), list) else []
+        replay_items = replay_result.get("checkpoints") if isinstance(replay_result.get("checkpoints"), list) else []
+        preserved = [
+            item
+            for item in base_items
+            if isinstance(item, dict) and (_safe_int(item.get("signal_ts")) or _safe_int(item.get("confirm_ts")) or 0) < replay_start_ts
+        ]
+        merged = [*preserved, *[item for item in replay_items if isinstance(item, dict)]]
+        merged.sort(key=lambda item: (_safe_int(item.get("signal_ts")) or _safe_int(item.get("confirm_ts")) or 0, str(item.get("date") or "")))
+        return [{**item, "index": index} for index, item in enumerate(merged[-100:], start=1)]
 
     def _build_strategy_package(self, backtest: dict[str, Any], signal_set: dict[str, Any]) -> dict[str, Any]:
         result = backtest.get("result") if isinstance(backtest.get("result"), dict) else {}
@@ -676,19 +1039,24 @@ class LiveStrategyService:
         config: dict[str, Any],
         marker_date: str,
         end_date: str,
+        *,
+        min_date: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         source_events = self._source_signal_events(str(strategy.get("source_signal_set_id") or ""))
+        min_date = min_date or str(config.get("start_date") or "")
         historical_events = [
             {**event, "signal_set_id": signal_set_id}
             for event in source_events
-            if str(event.get("confirm_time") or "")[:10] <= marker_date
+            if (not min_date or str(event.get("confirm_time") or "")[:10] >= min_date)
+            and str(event.get("confirm_time") or "")[:10] <= marker_date
         ]
         forward_events: list[dict[str, Any]] = []
         forward_summary: dict[str, Any] = {}
-        if end_date > marker_date:
+        forward_start_date = max(_next_date(marker_date), min_date) if min_date else _next_date(marker_date)
+        if end_date >= forward_start_date:
             forward_config = {
                 **config,
-                "start_date": _next_date(marker_date),
+                "start_date": forward_start_date,
                 "end_date": end_date,
             }
             forward_events, forward_summary = signal_pool_service._build_signal_events(signal_set_id, favorite, forward_config)
@@ -1275,6 +1643,12 @@ class LiveStrategyService:
             raise ValueError(f"不支持的实盘模式：{mode}")
         return normalized
 
+    def _normalize_refresh_mode(self, mode: Any) -> str:
+        normalized = str(mode or "incremental").strip().lower()
+        if normalized not in SUPPORTED_REFRESH_MODES:
+            raise ValueError(f"不支持的回测更新模式：{mode}")
+        return normalized
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -1854,6 +2228,46 @@ def _next_date(value: str) -> str:
         return (Date.fromisoformat(value) + timedelta(days=1)).isoformat()
     except ValueError:
         return value
+
+
+def _date_start_ms(value: str) -> int:
+    try:
+        dt = datetime.fromisoformat(f"{value}T00:00:00").replace(tzinfo=APP_TZ)
+    except ValueError:
+        return 0
+    return int(dt.timestamp() * 1000)
+
+
+def _timeframe_minutes(value: str) -> int | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    unit = normalized[-1]
+    try:
+        count = int(normalized[:-1])
+    except ValueError:
+        return None
+    if count <= 0:
+        return None
+    if unit == "m":
+        return count
+    if unit == "h":
+        return count * 60
+    if unit == "d":
+        return count * 24 * 60
+    return None
+
+
+def _renumber_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sorted_trades = sorted(
+        trades,
+        key=lambda item: (
+            _safe_int(item.get("exit_ts")) or 0,
+            _safe_int(item.get("entry_ts")) or 0,
+            str(item.get("inst_id") or ""),
+        ),
+    )
+    return [{**trade, "id": index} for index, trade in enumerate(sorted_trades, start=1)]
 
 
 def _point_date(point: dict[str, Any]) -> str:

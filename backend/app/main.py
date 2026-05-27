@@ -12,6 +12,7 @@ from .data_quality_service import data_quality_service
 from .data_source import data_source_service
 from .favorite_repository import screener_favorite_repository
 from .indicator_repository import IndicatorCreate, indicator_repository
+from .live_bot_service import live_bot_service
 from .live_service import live_strategy_service
 from .screener import builtin_indicators, query_screener, query_screener_time_counts
 from .signal_pool_service import signal_pool_service
@@ -121,6 +122,14 @@ class LiveStrategyModeRequest(BaseModel):
 
 class LiveStrategyRenameRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+
+
+class LiveBotStartRequest(BaseModel):
+    confirm_real_trade: bool = False
+
+
+class LiveBacktestRefreshRequest(BaseModel):
+    mode: str = "incremental"
 
 
 app.add_middleware(
@@ -565,13 +574,78 @@ def recheck_live_strategy(strategy_id: str) -> dict:
 
 
 @app.post("/api/live-strategies/{strategy_id}/refresh-backtest")
-def refresh_live_strategy_backtest(strategy_id: str) -> dict:
+def refresh_live_strategy_backtest(strategy_id: str, payload: LiveBacktestRefreshRequest | None = None) -> dict:
     try:
-        return live_strategy_service.refresh_backtest_history(strategy_id)
+        return live_strategy_service.refresh_backtest_history(strategy_id, (payload or LiveBacktestRefreshRequest()).mode)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _live_strategy_or_404(strategy_id: str) -> dict:
+    item = live_strategy_service.get_strategy(strategy_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"实盘策略不存在：{strategy_id}")
+    return item
+
+
+@app.post("/api/live-strategies/{strategy_id}/bot/generate")
+def generate_live_bot(strategy_id: str) -> dict:
+    try:
+        return live_bot_service.generate(_live_strategy_or_404(strategy_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/bot/start")
+def start_live_bot(strategy_id: str, payload: LiveBotStartRequest) -> dict:
+    if not payload.confirm_real_trade:
+        raise HTTPException(status_code=400, detail="启动真实实盘前必须确认：本次会连接交易所，资金硬上限 10 USDT。")
+    try:
+        return live_bot_service.start(_live_strategy_or_404(strategy_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/bot/stop")
+def stop_live_bot(strategy_id: str) -> dict:
+    _live_strategy_or_404(strategy_id)
+    try:
+        return live_bot_service.stop(strategy_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/live-strategies/{strategy_id}/bot/restart")
+def restart_live_bot(strategy_id: str, payload: LiveBotStartRequest) -> dict:
+    if not payload.confirm_real_trade:
+        raise HTTPException(status_code=400, detail="重启真实实盘前必须确认：本次会连接交易所，资金硬上限 10 USDT。")
+    try:
+        return live_bot_service.restart(_live_strategy_or_404(strategy_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/live-strategies/{strategy_id}/bot/status")
+def live_bot_status(
+    strategy_id: str,
+    tail_chars: int = Query(default=12000, ge=0, le=40000),
+) -> dict:
+    _live_strategy_or_404(strategy_id)
+    return live_bot_service.status(strategy_id, tail_chars=tail_chars)
 
 
 @app.get("/api/screener/query")

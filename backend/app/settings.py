@@ -93,6 +93,10 @@ CONTRACT_UPDATE_RUNTIME_DIR = _path_from_env(
     ("CONTRACT_UPDATE_RUNTIME_DIR",),
     RUNTIME_ROOT / "contract_update",
 )
+LIVE_BOT_RUNTIME_DIR = _path_from_env(
+    ("LIVE_BOT_RUNTIME_DIR",),
+    RUNTIME_ROOT / "live_bots",
+)
 
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
 USE_LEGACY_PIPELINE = _bool_from_env(
