@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-DEFAULT_RELAY_BASE_URL = "http://154.21.91.216:8000"
+DEFAULT_RELAY_BASE_URL = "https://www.okx.com"
 
 
 class RelayError(RuntimeError):

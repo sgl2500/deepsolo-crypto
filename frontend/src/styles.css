@@ -4675,66 +4675,118 @@ tbody tr:hover {
 
 .live-strategy-tabbar {
   display: flex;
-  gap: 14px;
-  align-items: flex-end;
+  gap: 16px;
+  align-items: center;
   justify-content: space-between;
-  padding: 0 24px;
-  background: #f5f7fa;
-  border-top: 1px solid #e6ebf2;
-  border-bottom: 1px solid #cfd8e3;
+  padding: 12px 24px;
+  background:
+    linear-gradient(180deg, #ffffff 0%, #f9fbfe 100%);
+  border-bottom: 1px solid #e4ebf3;
+  box-shadow: 0 10px 24px rgba(25, 35, 52, 0.05);
 }
 
 .live-strategy-tabs {
   display: flex;
-  gap: 6px;
+  gap: 10px;
   min-width: 0;
+  padding: 2px;
   overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .live-strategy-tabs button {
+  position: relative;
   display: grid;
-  gap: 3px;
-  min-width: 156px;
-  max-width: 260px;
-  padding: 10px 14px 9px;
-  color: #596579;
+  gap: 5px;
+  min-width: 148px;
+  max-width: 236px;
+  padding: 12px 16px 11px;
+  overflow: hidden;
+  color: #667085;
   text-align: left;
-  background: #edf1f6;
-  border: 1px solid #d7dfe9;
-  border-bottom: 0;
-  border-radius: 8px 8px 0 0;
+  background: #f6f8fb;
+  border: 1px solid #dde6f0;
+  border-radius: 9px;
+  box-shadow: 0 4px 12px rgba(25, 35, 52, 0.04);
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.live-strategy-tabs button::before {
+  position: absolute;
+  top: 0;
+  right: 14px;
+  left: 14px;
+  height: 3px;
+  content: "";
+  background: transparent;
+  border-radius: 0 0 999px 999px;
+}
+
+.live-strategy-tabs button:hover:not(:disabled) {
+  color: #344054;
+  background: #ffffff;
+  border-color: #c9d6e5;
+  box-shadow: 0 8px 20px rgba(25, 35, 52, 0.08);
+  transform: translateY(-1px);
 }
 
 .live-strategy-tabs button.active {
   color: #172033;
-  background: #ffffff;
-  border-color: #b8c7d9;
-  box-shadow: 0 -1px 0 #ffffff inset;
+  background:
+    linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+  border-color: #91b8ea;
+  box-shadow:
+    0 10px 24px rgba(47, 128, 237, 0.14),
+    0 0 0 1px rgba(47, 128, 237, 0.08);
+}
+
+.live-strategy-tabs button.active::before {
+  background: #2f80ed;
 }
 
 .live-strategy-tabs button span {
   overflow: hidden;
-  font-size: 14px;
-  font-weight: 900;
+  font-size: 15px;
+  font-weight: 950;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .live-strategy-tabs button em {
-  color: #7a8798;
-  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: #8a95a5;
+  font-size: 12px;
   font-style: normal;
-  font-weight: 800;
+  font-weight: 850;
   letter-spacing: 0;
+}
+
+.live-strategy-tabs button em::before {
+  width: 7px;
+  height: 7px;
+  content: "";
+  background: #a9b4c3;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(169, 180, 195, 0.14);
+}
+
+.live-strategy-tabs button.active em {
+  color: #667085;
+}
+
+.live-strategy-tabs button.active em::before {
+  background: #2f80ed;
+  box-shadow: 0 0 0 3px rgba(47, 128, 237, 0.14);
 }
 
 .live-tabbar-tools {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
   flex: 0 0 auto;
-  padding: 0 0 10px;
 }
 
 .live-tabbar-tools span {

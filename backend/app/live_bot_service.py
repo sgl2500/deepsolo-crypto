@@ -15,6 +15,9 @@ from .settings import LIVE_BOT_RUNTIME_DIR, PROJECT_ROOT
 
 
 CST = timezone(timedelta(hours=8))
+DEFAULT_OKX_BASE_URL = "https://www.okx.com"
+DEFAULT_CRYPTO_V2_SRC = PROJECT_ROOT / "local-pipeline" / "crypto-v2" / "src"
+DEFAULT_OKX_DIM_CATALOG = PROJECT_ROOT / "data" / "catalog" / "instruments_okx_usdt_swap_dim.json"
 MAX_TOTAL_CAP_USD = 10.0
 MAX_CAPITAL_PER_TRADE_USD = 10.0
 MAX_LEVERAGE = 1.0
@@ -237,10 +240,19 @@ class LiveBotService:
             "max_positions": min(_safe_int(risk.get("max_positions"), MAX_POSITIONS), MAX_POSITIONS),
             "max_same_symbol_positions": 1,
         }
+        okx_env_path = os.getenv("OKX_ENV_PATH", "").strip()
+        trading_adapter_src = os.getenv("OKX_TRADING_ADAPTER_SRC", "").strip()
+        crypto_v2_src = os.getenv("CRYPTO_V2_SRC", str(DEFAULT_CRYPTO_V2_SRC)).strip()
+        relay_base_url = (
+            os.getenv("OKX_RELAY_BASE_URL")
+            or os.getenv("OKX_BASE_URL")
+            or DEFAULT_OKX_BASE_URL
+        ).strip() or DEFAULT_OKX_BASE_URL
+        dim_catalog = os.getenv("OKX_DIM_CATALOG", str(DEFAULT_OKX_DIM_CATALOG)).strip()
         return {
             "dry_run": False,
-            "env_path": os.getenv("OKX_ENV_PATH", str(PROJECT_ROOT.parent / "crypto" / "okx-trading" / ".env")),
-            "relay_base_url": os.getenv("OKX_RELAY_BASE_URL", "http://154.21.91.216:8000"),
+            "env_path": okx_env_path,
+            "relay_base_url": relay_base_url,
             "strategy_id": strategy["id"],
             "strategy_name": strategy.get("name") or "",
             "strategy_package_hash": package.get("package_hash") or "",
@@ -257,16 +269,12 @@ class LiveBotService:
             "risk_guard": risk_guard,
             "universe": {
                 "use_dim": True,
-                "dim_catalog": os.getenv(
-                    "OKX_DIM_CATALOG",
-                    str(PROJECT_ROOT.parent / "crypto" / "crypto-v2" / "data" / "catalog" / "instruments_okx_usdt_swap_dim.json"),
-                ),
+                "dim_catalog": dim_catalog,
             },
             "scan": {"max_workers": 10},
             "paths": {
-                "project_root": str(PROJECT_ROOT.parent / "crypto"),
-                "crypto_v2_src": str(PROJECT_ROOT.parent / "crypto" / "crypto-v2" / "src"),
-                "pump_fade_live_root": str(PROJECT_ROOT.parent / "crypto" / "pump-fade-live"),
+                "crypto_v2_src": crypto_v2_src,
+                "trading_adapter_src": trading_adapter_src,
             },
             "supported_strategy": "pump_fade_v1",
             "metadata_conditions": conditions,
@@ -448,6 +456,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CST = timezone(timedelta(hours=8))
+DEFAULT_OKX_BASE_URL = "https://www.okx.com"
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else SCRIPT_DIR / "config.live.json"
 STATE_DIR = SCRIPT_DIR / "state"
@@ -487,7 +496,7 @@ def load_config(path: Path) -> dict:
 
 def setup_paths(config: dict) -> None:
     paths = config.get("paths") if isinstance(config.get("paths"), dict) else {}
-    for item in (paths.get("pump_fade_live_root"), paths.get("crypto_v2_src")):
+    for item in (paths.get("trading_adapter_src"), paths.get("crypto_v2_src")):
         if item and str(item) not in sys.path:
             sys.path.insert(0, str(item))
 
@@ -554,18 +563,28 @@ def validate_supported_strategy(config: dict, log: logging.Logger) -> bool:
 
 
 def build_clients(config: dict, dry_run: bool):
-    from data.base import DataClient
-    from data.instruments import InstrumentsAPI
-    from data.market import MarketAPI
-    from data.trade import TradeAPI
+    try:
+        from data.base import DataClient
+        from data.instruments import InstrumentsAPI
+        from data.market import MarketAPI
+        from data.trade import TradeAPI
+    except ImportError as exc:
+        adapter_src = (config.get("paths") or {}).get("trading_adapter_src") if isinstance(config.get("paths"), dict) else ""
+        raise RuntimeError(
+            "缺少 OKX 真实交易适配器，请设置 OKX_TRADING_ADAPTER_SRC 指向包含 data/base.py、data/market.py、data/trade.py 的目录"
+            f"；当前值={adapter_src or '<empty>'}"
+        ) from exc
 
-    env_path = str(Path(config["env_path"]))
+    env_path_value = str(config.get("env_path") or "").strip()
+    if not dry_run and not env_path_value:
+        raise RuntimeError("真实实盘需要设置 OKX_ENV_PATH，指向本机保存 OKX API 凭据的 env 文件")
+    env_path = str(Path(env_path_value)) if env_path_value else ""
     if dry_run:
         client = DataClient.__new__(DataClient)
         client.api_key = ""
         client.secret_key = ""
         client.passphrase = ""
-        client.base_url = config.get("relay_base_url", "http://154.21.91.216:8000")
+        client.base_url = str(config.get("relay_base_url") or DEFAULT_OKX_BASE_URL).strip() or DEFAULT_OKX_BASE_URL
     else:
         client = DataClient(env_path)
     market = MarketAPI(client)
